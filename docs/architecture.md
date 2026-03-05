@@ -534,19 +534,22 @@ CREATE INDEX idx_signals_node         ON misbehavior_signals(node_id, detected_a
 
 ## 5. Network Communication Matrix
 
-| From | To | Protocol | Auth | Port |
-|---|---|---|---|---|
-| `owm-node` | `owm-coordinator` | gRPC + mTLS | Ed25519 node identity cert | 9000 |
-| `owm-node` | `owm-pool` | Stratum v2 (Noise) | OWM Ed25519 identity key | 3333 |
-| `owm-coordinator` | `Treasury LND` | gRPC | Macaroon (admin) | 10009 |
-| `owm-coordinator` | `Treasury LND` (slash) | gRPC | Macaroon (restricted: ForceCloseChan only) | 10009 |
-| `owm-pool` | `bitcoin-node` | JSON-RPC over HTTP | RPC username/password | 8332 |
-| `owm-pool` | `Treasury LND` | gRPC | Macaroon (invoice + pay) | 10009 |
-| `Public API` | `owm-coordinator` | gRPC (internal) | Service mesh mTLS | 9001 |
-| `GitHub App` | `owm-coordinator` | HTTP (internal) | Service token | 9002 |
-| Operators | `Public API` | HTTPS | API key / LN invoice | 443 |
-| Operators | `owm-governance` | HTTPS | Node identity signature | 443 |
-| `OTS Calendars` | External | HTTPS | None (public) | 443 |
+| From | To | Protocol | Transport | Auth | Port |
+|---|---|---|---|---|---|
+| `owm-node` | `owm-coordinator` | gRPC + mTLS | Clearnet (default) | Ed25519 node identity cert | 9000 |
+| `owm-node` | `owm-coordinator` | gRPC + mTLS | Tor SOCKS5 → `.onion` (opt-in) | Ed25519 node identity cert | 9000 |
+| `owm-coordinator` | Tor local bind | gRPC + mTLS | localhost only (Tor forwards) | Ed25519 node identity cert | 9002 |
+| `owm-node` | `owm-pool` | Stratum v2 (Noise) | Clearnet only | OWM Ed25519 identity key | 3333 |
+| `owm-coordinator` | `Treasury LND` | gRPC | Clearnet or LND `.onion` | Macaroon (readonly) | 10009 |
+| `owm-coordinator` | `Treasury LND` (slash) | gRPC | Clearnet or LND `.onion` | Macaroon (restricted: ForceCloseChan only) | 10009 |
+| `owm-pool` | `bitcoin-node` | JSON-RPC over HTTP | Clearnet only | RPC username/password | 8332 |
+| `owm-pool` | `Treasury LND` | gRPC | Clearnet or LND `.onion` | Macaroon (invoice + pay) | 10009 |
+| `Public API` | `owm-coordinator` | gRPC (internal) | Clearnet only | Service mesh mTLS | 9001 |
+| `GitHub App` | `owm-coordinator` | HTTP (internal) | Clearnet only | Service token | 9003 |
+| Operators | `Public API` | HTTPS | Clearnet only | API key / LN invoice | 443 |
+| Operators | `owm-governance` | HTTPS | Clearnet only | Node identity signature | 443 |
+| `OTS Calendars` | External | HTTPS | Clearnet only | None (public) | 443 |
+| LN channel (node) | `Treasury LND` | Lightning (BOLT2) | Clearnet or `.onion` (LND native) | Lightning channel auth | varies |
 
 ---
 
@@ -575,7 +578,10 @@ CREATE INDEX idx_signals_node         ON misbehavior_signals(node_id, detected_a
                         │  │  bitcoin-node         │   │    ← Core or Knots
                         │  └──────────────────────┘    │
                         │  ┌──────────────────────┐    │
-                        │  │  LND (treasury)      │    │    ← Lightning node
+                        │  │  LND (treasury)      │    │    ← Lightning node (clearnet + optional .onion)
+                        │  └──────────────────────┘    │
+                        │  ┌──────────────────────┐    │
+                        │  │  tor daemon          │    │    ← opt-in; forwards .onion:9000 → 127.0.0.1:9002
                         │  └──────────────────────┘    │
                         │  ┌──────────────────────┐    │
                         │  │  OTS calendar        │    │    ← self-hosted OTS

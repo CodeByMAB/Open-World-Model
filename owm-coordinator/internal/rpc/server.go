@@ -79,7 +79,7 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 		SupportedTaskTypes: req.Capabilities.SupportedTaskTypes,
 	}
 
-	node, err := s.registry.Register(ctx, req.PublicKey, req.LnNodeUri, caps, req.Signature, req.Timestamp)
+	node, err := s.registry.Register(ctx, req.PublicKey, req.LnNodeUri, req.OnionAddress, caps, req.Signature, req.Timestamp)
 	if err != nil {
 		s.log.Warn("node registration failed", zap.String("pubkey", req.PublicKey), zap.Error(err))
 		return nil, status.Errorf(codes.PermissionDenied, "registration failed: %v", err)

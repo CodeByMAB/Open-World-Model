@@ -18,6 +18,7 @@ type Config struct {
 	Lightning LightningConfig
 	FL        FLConfig
 	Stake     StakeConfig
+	Tor       TorConfig
 	Log       LogConfig
 }
 
@@ -68,6 +69,28 @@ type StakeConfig struct {
 	T2T3MaintainerAcks int // maintainer acks required for T2/T3 slash
 }
 
+// TorConfig controls the optional Tor dual-transport layer (SRS-NET-01, ADR-005).
+// When Enabled is true the coordinator binds a second gRPC listener on
+// LocalBindAddr and expects the Tor daemon to forward the hidden service port
+// to that address. Data-plane traffic (FL gradients, model weights, Stratum v2)
+// never goes through Tor regardless of this setting.
+type TorConfig struct {
+	// Enabled activates the Tor hidden service listener and SOCKS5 dialer.
+	Enabled bool
+	// LocalBindAddr is the address the coordinator listens on for forwarded
+	// Tor connections. The Tor daemon maps .onion:9000 → LocalBindAddr.
+	// Default: "127.0.0.1:9002"
+	LocalBindAddr string
+	// SOCKS5Addr is the outbound Tor SOCKS5 proxy address used when the
+	// coordinator needs to dial .onion endpoints (e.g. LND over Tor).
+	// Default: "127.0.0.1:9050"
+	SOCKS5Addr string
+	// HiddenServiceDir is the path to the Tor HiddenServiceDir. The coordinator
+	// reads HiddenServiceDir/hostname at startup to log the .onion address.
+	// Default: "/var/lib/tor/owm-coordinator"
+	HiddenServiceDir string
+}
+
 type LogConfig struct {
 	Level  string // "debug" | "info" | "warn" | "error"
 	Format string // "json" | "console"
@@ -99,6 +122,10 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("stake.slash_cooldown_days", 30)
 	v.SetDefault("stake.t1_auto_slash_signals", 3)
 	v.SetDefault("stake.t2t3_maintainer_acks", 2)
+	v.SetDefault("tor.enabled", false)
+	v.SetDefault("tor.local_bind_addr", "127.0.0.1:9002")
+	v.SetDefault("tor.socks5_addr", "127.0.0.1:9050")
+	v.SetDefault("tor.hidden_service_dir", "/var/lib/tor/owm-coordinator")
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 

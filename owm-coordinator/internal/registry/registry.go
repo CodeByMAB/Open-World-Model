@@ -32,8 +32,9 @@ const (
 // Node represents a registered OWM network participant.
 type Node struct {
 	NodeID        uuid.UUID
-	PublicKey     string // Ed25519 hex
-	LNNodeURI     string // pubkey@host:port
+	PublicKey     string  // Ed25519 hex
+	LNNodeURI     string  // pubkey@host:port (clearnet or .onion)
+	OnionAddress  string  // optional Tor v3 .onion hostname for control-plane access
 	Tier          string
 	VRAMGB        float64
 	RAMGB         float64
@@ -67,8 +68,9 @@ func New(db *pgxpool.Pool, log *zap.Logger) *Registry {
 }
 
 // Register inserts a new node record in pending state after verifying the
-// request signature. Returns the node ID and initial status.
-func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI string, caps NodeCapabilities, sig []byte, timestamp int64) (*Node, error) {
+// request signature. onionAddr is optional (empty string if the node does not
+// publish a Tor address). Returns the node ID and initial status.
+func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr string, caps NodeCapabilities, sig []byte, timestamp int64) (*Node, error) {
 	// Verify anti-replay: reject requests older than 5 minutes.
 	reqTime := time.Unix(timestamp, 0)
 	if time.Since(reqTime) > 5*time.Minute {
@@ -90,6 +92,7 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI string, caps N
 		NodeID:        uuid.New(),
 		PublicKey:     pubKeyHex,
 		LNNodeURI:     lnURI,
+		OnionAddress:  onionAddr,
 		Tier:          caps.Tier,
 		VRAMGB:        caps.VRAMGB,
 		RAMGB:         caps.RAMGB,
@@ -100,11 +103,12 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI string, caps N
 	}
 
 	const q = `
-		INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, vram_gb, ram_gb,
-		                   bandwidth_mbps, reliability, status, registered_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO nodes (node_id, public_key, ln_node_uri, onion_address, tier,
+		                   vram_gb, ram_gb, bandwidth_mbps, reliability, status, registered_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (public_key) DO UPDATE
 			SET ln_node_uri    = EXCLUDED.ln_node_uri,
+			    onion_address  = EXCLUDED.onion_address,
 			    tier           = EXCLUDED.tier,
 			    vram_gb        = EXCLUDED.vram_gb,
 			    ram_gb         = EXCLUDED.ram_gb,
@@ -114,7 +118,7 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI string, caps N
 		RETURNING node_id, status`
 
 	row := r.db.QueryRow(ctx, q,
-		node.NodeID, node.PublicKey, node.LNNodeURI, node.Tier,
+		node.NodeID, node.PublicKey, node.LNNodeURI, node.OnionAddress, node.Tier,
 		node.VRAMGB, node.RAMGB, node.BandwidthMbps, node.Reliability,
 		node.Status, node.RegisteredAt,
 	)
@@ -150,7 +154,7 @@ func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendi
 // GetByPublicKey retrieves a node by its Ed25519 public key.
 func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node, error) {
 	const q = `
-		SELECT node_id, public_key, ln_node_uri, tier, vram_gb, ram_gb,
+		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
 		       bandwidth_mbps, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE public_key = $1`
@@ -158,7 +162,7 @@ func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node,
 	var n Node
 	row := r.db.QueryRow(ctx, q, pubKeyHex)
 	err := row.Scan(
-		&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.Tier,
+		&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.OnionAddress, &n.Tier,
 		&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.Reliability,
 		&n.TotalTasks, &n.TotalSats, &n.Status, &n.RegisteredAt, &n.LastHeartbeat,
 	)
@@ -171,7 +175,7 @@ func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node,
 // ListActive returns all nodes currently in active status.
 func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 	const q = `
-		SELECT node_id, public_key, ln_node_uri, tier, vram_gb, ram_gb,
+		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
 		       bandwidth_mbps, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE status = 'active' ORDER BY reliability DESC`
@@ -186,7 +190,7 @@ func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 	for rows.Next() {
 		var n Node
 		if err := rows.Scan(
-			&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.Tier,
+			&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.OnionAddress, &n.Tier,
 			&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.Reliability,
 			&n.TotalTasks, &n.TotalSats, &n.Status, &n.RegisteredAt, &n.LastHeartbeat,
 		); err != nil {

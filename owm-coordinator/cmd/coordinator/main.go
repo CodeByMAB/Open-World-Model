@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,6 +106,7 @@ func run() error {
 	grpcSrv := grpc.NewServer(grpcOpts...)
 	coordinatorv1.RegisterCoordinatorServiceServer(grpcSrv, srv)
 
+	// ── Clearnet listener ─────────────────────────────────────────────────────
 	addr := cfg.Server.GRPCAddr
 	if addr == "" {
 		addr = ":9000"
@@ -112,7 +115,36 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", addr, err)
 	}
-	log.Info("gRPC server listening", zap.String("addr", addr))
+	log.Info("gRPC server listening (clearnet)", zap.String("addr", addr))
+
+	// ── Tor hidden service listener (optional, SRS-NET-01, SRS-COORD-07) ─────
+	if cfg.Tor.Enabled {
+		torAddr := cfg.Tor.LocalBindAddr
+		if torAddr == "" {
+			torAddr = "127.0.0.1:9002"
+		}
+		torLis, err := net.Listen("tcp", torAddr)
+		if err != nil {
+			return fmt.Errorf("listening on Tor local bind addr %s: %w", torAddr, err)
+		}
+		log.Info("gRPC server listening (Tor local bind)", zap.String("addr", torAddr))
+
+		// Read the .onion hostname from the Tor HiddenServiceDir (SRS-COORD-09).
+		onionHostname := readOnionHostname(cfg.Tor.HiddenServiceDir, log)
+		if onionHostname != "" {
+			log.Info("Tor hidden service active",
+				zap.String("onion_address", onionHostname),
+				zap.String("socks5_addr", cfg.Tor.SOCKS5Addr),
+			)
+		}
+
+		// Serve the same gRPC server on the Tor-forwarded local port.
+		go func() {
+			if err := grpcSrv.Serve(torLis); err != nil {
+				log.Error("Tor gRPC listener stopped", zap.Error(err))
+			}
+		}()
+	}
 
 	// ── Background tickers ────────────────────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -164,6 +196,21 @@ func run() error {
 	grpcSrv.GracefulStop()
 	log.Info("coordinator stopped cleanly")
 	return nil
+}
+
+// readOnionHostname reads the Tor hidden service hostname from
+// HiddenServiceDir/hostname and returns it trimmed, or "" on any error.
+func readOnionHostname(hiddenServiceDir string, log *zap.Logger) string {
+	hostFile := filepath.Join(hiddenServiceDir, "hostname")
+	data, err := os.ReadFile(hostFile)
+	if err != nil {
+		log.Warn("could not read Tor hidden service hostname",
+			zap.String("path", hostFile),
+			zap.Error(err),
+		)
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // runTicker fires fn on the given interval until ctx is cancelled.

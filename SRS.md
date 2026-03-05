@@ -656,6 +656,9 @@ POST   /v1/governance/proposals/{id}/comment  # Comment on a proposal
 | SRS-COORD-04 | In Phase 2, the coordinator shall migrate node discovery to a Kademlia DHT, reducing central dependency |
 | SRS-COORD-05 | The coordinator shall be horizontally scalable behind a load balancer |
 | SRS-COORD-06 | The coordinator shall store state in a PostgreSQL database with WAL replication |
+| SRS-COORD-07 | The coordinator SHALL publish a Tor v3 hidden service (`.onion`) address for its gRPC control-plane endpoint in addition to the clearnet address |
+| SRS-COORD-08 | The coordinator SHALL bind the Tor hidden service to a local-only port (default `127.0.0.1:9002`) distinct from the public clearnet gRPC port, with both served by the same gRPC server instance |
+| SRS-COORD-09 | At startup the coordinator SHALL read and log its `.onion` hostname from the Tor `HiddenServiceDir/hostname` file when Tor mode is enabled |
 
 ---
 
@@ -827,7 +830,8 @@ Node may re-register and open a new stake channel
 class Node:
     node_id: str                    # UUID v4
     public_key: str                 # Ed25519 public key (hex)
-    ln_node_uri: str                # pubkey@host:port
+    ln_node_uri: str                # pubkey@host:port (clearnet or .onion)
+    onion_address: str | None       # optional Tor v3 .onion address for control plane
     tier: Literal["t1", "t2", "t3"]
     vram_gb: float
     ram_gb: float
@@ -994,6 +998,20 @@ message TaskResult {
   bytes signature = 6;         // Ed25519 signature over task_id + output_hash
 }
 ```
+
+---
+
+## 6.2 Network Transport Requirements
+
+| ID | Requirement |
+|---|---|
+| SRS-NET-01 | The coordinator control plane (gRPC: register, heartbeat, task dispatch, stake queries) SHALL support both clearnet TCP and Tor hidden service transport |
+| SRS-NET-02 | Node operators MAY configure a SOCKS5 proxy address (typically `127.0.0.1:9050`) in `owm.toml` to route all control-plane gRPC connections through Tor |
+| SRS-NET-03 | Nodes MAY register an optional `onion_address` (v3 `.onion` hostname) alongside their clearnet `ln_node_uri`; the coordinator SHALL persist this in the node registry |
+| SRS-NET-04 | FL gradient uploads and model weight downloads SHALL use clearnet only; the node daemon SHALL reject attempts to route these over a SOCKS5 proxy |
+| SRS-NET-05 | Stratum v2 mining connections SHALL use clearnet only; share submission is latency-sensitive and incompatible with Tor overhead |
+| SRS-NET-06 | Lightning Network channels MAY use Tor `.onion` addresses in `ln_node_uri`; this is handled natively by LND and requires no coordinator changes |
+| SRS-NET-07 | The coordinator SHALL NOT enforce IP-based rate limiting on the Tor hidden service endpoint, as all Tor connections appear to originate from `127.0.0.1`; rate limiting on that endpoint SHALL be based on node public key |
 
 ---
 

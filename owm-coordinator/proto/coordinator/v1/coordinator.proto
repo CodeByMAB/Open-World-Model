@@ -33,10 +33,11 @@ service CoordinatorService {
 // ─────────────────────────────────────────────
 message RegisterNodeRequest {
   string           public_key    = 1; // Ed25519 hex
-  string           ln_node_uri   = 2; // pubkey@host:port
+  string           ln_node_uri   = 2; // pubkey@host:port (clearnet or .onion)
   NodeCapabilities capabilities  = 3;
   bytes            signature     = 4; // Ed25519 sig over canonical fields
   int64            timestamp     = 5; // Unix seconds (anti-replay)
+  string           onion_address = 6; // optional Tor v3 .onion hostname for control-plane access
 }
 
 message NodeCapabilities {
