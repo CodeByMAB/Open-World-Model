@@ -12,6 +12,7 @@ import (
 
 // Config holds all coordinator runtime configuration.
 type Config struct {
+	DevMode   bool // when true, Lightning may use mock client; LND/macaroon not required
 	Server    ServerConfig
 	Database  DatabaseConfig
 	Redis     RedisConfig
@@ -128,6 +129,7 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("tor.hidden_service_dir", "/var/lib/tor/owm-coordinator")
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
+	v.SetDefault("dev_mode", false)
 
 	// Environment variable binding (OWM_SERVER_GRPC_ADDR, etc.)
 	v.SetEnvPrefix("OWM")
@@ -158,17 +160,20 @@ func (c *Config) validate() error {
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn (OWM_DATABASE_DSN) is required")
 	}
-	if c.Lightning.LNDHost == "" {
-		return fmt.Errorf("lightning.lnd_host (OWM_LIGHTNING_LND_HOST) is required")
-	}
-	if c.Lightning.PaymentMacaroonPath == "" {
-		return fmt.Errorf("lightning.payment_macaroon_path is required")
-	}
-	if c.Lightning.ReadonlyMacaroonPath == "" {
-		return fmt.Errorf("lightning.readonly_macaroon_path is required")
-	}
-	if c.Lightning.SlashingMacaroonPath == "" {
-		return fmt.Errorf("lightning.slashing_macaroon_path is required")
+	// In dev mode, Lightning credentials are optional (mock client is used).
+	if !c.DevMode {
+		if c.Lightning.LNDHost == "" {
+			return fmt.Errorf("lightning.lnd_host (OWM_LIGHTNING_LND_HOST) is required (set OWM_DEV_MODE=true to use mock)")
+		}
+		if c.Lightning.PaymentMacaroonPath == "" {
+			return fmt.Errorf("lightning.payment_macaroon_path is required")
+		}
+		if c.Lightning.ReadonlyMacaroonPath == "" {
+			return fmt.Errorf("lightning.readonly_macaroon_path is required")
+		}
+		if c.Lightning.SlashingMacaroonPath == "" {
+			return fmt.Errorf("lightning.slashing_macaroon_path is required")
+		}
 	}
 	return nil
 }

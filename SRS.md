@@ -42,7 +42,7 @@
 
 ### 1.1 Purpose
 
-This Software Requirements Specification defines the technical requirements, architecture, interfaces, and constraints for implementing the Open World Model (OWM) system as described in BRS v1.0.0.
+This Software Requirements Specification defines the technical requirements, architecture, interfaces, and constraints for implementing the Open World Model (OWM) system as described in BRS v1.1.0.
 
 ### 1.2 Scope
 
@@ -73,7 +73,7 @@ This document covers all software components of the OWM system: the node daemon,
 
 ### 1.4 References
 
-- BRS v1.0.0 (`BRS.md`)
+- BRS v1.1.0 (`BRS.md`)
 - Bitcoin Lightning Network BOLT specifications: https://github.com/lightning/bolts
 - OpenTimestamps specification: https://opentimestamps.org
 - Federated Learning: McMahan et al., "Communication-Efficient Learning of Deep Networks from Decentralized Data" (2017)
@@ -1231,6 +1231,40 @@ All public-facing Python code shall include:
 
 ## 13. Directory Structure
 
+### 13.1 Current structure
+
+As of the document date, the repository contains the following. LICENSE, CONTRIBUTING.md, SECURITY.md, and CHANGELOG.md are planned and referenced elsewhere in this SRS.
+
+```
+Open-World-Model/
+├── BRS.md                          # Business Requirements Specification
+├── SRS.md                          # Software Requirements Specification
+├── README.md                       # Project overview, status, development
+├── owm-coordinator/                # Coordinator service (Go) — implemented
+│   ├── cmd/coordinator/            # Entrypoint
+│   ├── internal/
+│   │   ├── config/                 # Configuration loading
+│   │   ├── registry/               # Node registry
+│   │   ├── scheduler/              # Task scheduler
+│   │   ├── fl/                     # FL round orchestration
+│   │   ├── rpc/                    # gRPC server
+│   │   ├── stake/                  # PoS stake verification
+│   │   └── lightning/              # Lightning client (LND)
+│   ├── proto/coordinator/v1/       # Protobuf definitions
+│   ├── Dockerfile
+│   └── go.mod
+├── docs/
+│   ├── architecture.md            # System topology, sequences
+│   └── adr/                        # ADR-001 through ADR-005
+└── .github/
+    └── workflows/
+        └── ci.yml                  # Coordinator build, lint, Docker
+```
+
+### 13.2 Target structure (planned)
+
+The intended full layout per the roadmap; components not yet present are planned for implementation.
+
 ```
 Open-World-Model/
 ├── BRS.md                          # Business Requirements Specification
@@ -1240,7 +1274,7 @@ Open-World-Model/
 ├── SECURITY.md
 ├── CHANGELOG.md
 ├── README.md
-├── owm-node/                       # Node daemon (Python + Rust)
+├── owm-node/                       # Node daemon (Python + Rust) — planned
 │   ├── src/
 │   │   ├── owm/
 │   │   │   ├── __init__.py
@@ -1262,7 +1296,7 @@ Open-World-Model/
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   └── Cargo.toml
-├── owm-pool/                       # Bitcoin mining pool (Rust, SRI-based)
+├── owm-pool/                       # Bitcoin mining pool (Rust, SRI-based) — planned
 │   ├── src/
 │   │   ├── pool/                   # Stratum v2 pool core
 │   │   ├── fpps/                   # FPPS payout engine
@@ -1282,12 +1316,12 @@ Open-World-Model/
 │   ├── tests/
 │   ├── Dockerfile
 │   └── go.mod
-├── owm-governance/                 # Governance portal (Python/HTMX)
+├── owm-governance/                 # Governance portal (Python/HTMX) — planned
 │   ├── src/
 │   ├── templates/
 │   ├── static/
 │   └── Dockerfile
-├── deploy/                         # Deployment configs
+├── deploy/                         # Deployment configs — planned
 │   ├── docker-compose.yml          # Local dev environment
 │   ├── docker-compose.test.yml     # Integration test environment
 │   ├── k8s/                        # Kubernetes manifests (coordinator)
@@ -1296,22 +1330,22 @@ Open-World-Model/
 │       └── setup-treasury.sh       # Multisig treasury setup guide
 ├── docs/
 │   ├── architecture.md
-│   ├── node-setup.md
-│   ├── api-reference.md
-│   ├── fl-protocol.md
-│   ├── lightning-integration.md
-│   ├── github-app.md
-│   ├── governance.md
-│   └── ots-verification.md
+│   ├── node-setup.md               # planned
+│   ├── api-reference.md           # planned
+│   ├── fl-protocol.md             # planned
+│   ├── lightning-integration.md   # planned
+│   ├── github-app.md              # planned
+│   ├── governance.md              # planned
+│   └── ots-verification.md        # planned
 └── .github/
     ├── workflows/
     │   ├── ci.yml
-    │   └── release.yml
-    └── ISSUE_TEMPLATE/
+    │   └── release.yml            # planned
+    └── ISSUE_TEMPLATE/            # planned
         ├── bug_report.md
         └── owm-bounty.md           # Bounty issue template
 ```
 
 ---
 
-*End of Software Requirements Specification v1.0.0*
+*End of Software Requirements Specification v1.1.0*

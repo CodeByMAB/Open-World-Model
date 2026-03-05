@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS node_stakes;
+DROP TABLE IF EXISTS nodes;

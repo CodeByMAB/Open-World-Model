@@ -1,7 +1,13 @@
 package stake_test
 
 import (
+	"context"
+	"os"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 
 	"github.com/owmnetwork/owm-coordinator/internal/stake"
 )
@@ -50,6 +56,38 @@ func TestSlashConfigDefaults(t *testing.T) {
 	}
 	if cfg.T2T3MaintainerAcks != 2 {
 		t.Errorf("T2T3MaintainerAcks = %d, want 2", cfg.T2T3MaintainerAcks)
+	}
+}
+
+// TestVerifyStake_NilClient asserts that when lnReadonly is nil (dev mode),
+// VerifyStake returns a synthetic OK result without calling Lightning.
+func TestVerifyStake_NilClient(t *testing.T) {
+	dsn := os.Getenv("OWM_TEST_DSN")
+	if dsn == "" {
+		t.Skip("OWM_TEST_DSN not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("cannot connect to test DB: %v", err)
+	}
+	defer pool.Close()
+	log := zap.NewNop()
+	v := stake.New(pool, nil, nil, stake.SlashConfig{
+		T1AutoSlashSignals: 3,
+		T2T3MaintainerAcks: 2,
+		CooldownDuration:   30 * 24 * time.Hour,
+	}, log)
+	result, err := v.VerifyStake(ctx, "any-pubkey", "t1")
+	if err != nil {
+		t.Fatalf("VerifyStake with nil client: %v", err)
+	}
+	if !result.OK {
+		t.Errorf("expected synthetic OK when lnReadonly is nil, got OK=false")
+	}
+	if result.ChannelID != "dev-no-ln-client" {
+		t.Errorf("expected ChannelID dev-no-ln-client, got %q", result.ChannelID)
 	}
 }
 

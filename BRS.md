@@ -136,6 +136,10 @@ The Open World Model will be the world's first community-owned, continuously upd
 - Non-Bitcoin payment rails (fiat, other cryptocurrencies) in Phase 1.
 - Solo mining without pool coordination (nodes mine via the OWM pool only).
 
+### 6.3 Current implementation status
+
+As of the document date, the repository contains only the **coordinator service** (`owm-coordinator`, implemented in Go): node registry, task scheduler, federated-learning orchestration, stake verification, and gRPC API. The node daemon, mining pool, governance portal, public API, and related deployment and documentation assets are specified in this BRS and in the SRS and are planned for implementation per the roadmap.
+
 ---
 
 ## 7. Business Requirements
@@ -409,4 +413,4 @@ The Lightning channel stake acts as OWM's native Proof-of-Stake mechanism — en
 
 ---
 
-*End of Business Requirements Specification v1.1.1*
+*End of Business Requirements Specification v1.1.0*

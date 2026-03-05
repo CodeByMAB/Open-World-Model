@@ -65,10 +65,24 @@ func New(db *pgxpool.Pool, lnReadonly, lnSlash lightning.Client, cfg SlashConfig
 // VerifyStake checks whether the node identified by pubKeyHex has an open
 // Lightning channel to the treasury that meets the minimum capacity for tier.
 // This is called during node registration (SRS-STAKE-01, SRS-LN-11).
+// When lnReadonly is nil (e.g. dev mode without mock), returns a synthetic OK
+// result so registration can proceed; callers should prefer injecting a mock client.
 func (v *Verifier) VerifyStake(ctx context.Context, pubKeyHex, tier string) (*StakeResult, error) {
 	tierMin, ok := TierMinimums[tier]
 	if !ok {
 		return nil, fmt.Errorf("unknown tier: %s", tier)
+	}
+
+	if v.lnReadonly == nil {
+		// Nil-guard: no LN client (dev mode). Return synthetic OK for persistence.
+		return &StakeResult{
+			OK:               true,
+			ChannelID:        "dev-no-ln-client",
+			CapacitySats:     tierMin,
+			LocalBalanceSats: tierMin,
+			TierMinimumSats:  tierMin,
+			BonusMultiplier:  1.0,
+		}, nil
 	}
 
 	channels, err := v.lnReadonly.ListChannels(ctx, pubKeyHex)
@@ -131,7 +145,11 @@ func (v *Verifier) PersistStake(ctx context.Context, nodeID uuid.UUID, result *S
 
 // VerifyAllActive re-checks stake channels for all active nodes.
 // Called on a 6-hour timer (SRS-STAKE-02).
+// When lnReadonly is nil, returns nil (no-op) to avoid panics.
 func (v *Verifier) VerifyAllActive(ctx context.Context) error {
+	if v.lnReadonly == nil {
+		return nil
+	}
 	rows, err := v.db.Query(ctx,
 		`SELECT n.node_id, n.public_key, n.tier, ns.channel_id, ns.tier_minimum
 		 FROM nodes n JOIN node_stakes ns ON ns.node_id = n.node_id
@@ -221,6 +239,9 @@ func (v *Verifier) Slash(ctx context.Context, nodeID uuid.UUID, tier, reason, ev
 		zap.String("reason", reason),
 	)
 
+	if v.lnSlash == nil {
+		return fmt.Errorf("cannot slash: Lightning slashing client is nil (dev mode or misconfiguration)")
+	}
 	// Force-close via the restricted slashing LND credential (SRS-SEC-13).
 	if err := v.lnSlash.ForceCloseChan(ctx, channelID); err != nil {
 		return fmt.Errorf("force-closing channel %s: %w", channelID, err)

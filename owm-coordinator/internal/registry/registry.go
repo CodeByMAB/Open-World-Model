@@ -217,7 +217,7 @@ func (r *Registry) UpdateReliability(ctx context.Context, nodeID uuid.UUID, succ
 	if success {
 		col = "total_tasks = total_tasks + 1"
 	} else {
-		col = "total_tasks = total_tasks + 1"
+		col = "reliability = reliability"
 	}
 	// Simplified reliability update; a full implementation uses a time-windowed query.
 	_, err := r.db.Exec(ctx,

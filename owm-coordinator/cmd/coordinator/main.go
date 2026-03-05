@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -22,6 +25,8 @@ import (
 
 	"github.com/owmnetwork/owm-coordinator/internal/config"
 	"github.com/owmnetwork/owm-coordinator/internal/fl"
+	"github.com/owmnetwork/owm-coordinator/internal/lightning"
+	"github.com/owmnetwork/owm-coordinator/internal/lightning/mock"
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
 	"github.com/owmnetwork/owm-coordinator/internal/rpc"
 	"github.com/owmnetwork/owm-coordinator/internal/scheduler"
@@ -39,9 +44,15 @@ func main() {
 func run() error {
 	// ── Config ────────────────────────────────────────────────────────────────
 	// Optionally pass a config file path via OWM_CONFIG_FILE or as first arg.
+	// Support --migrate-only flag; remaining argument (if any) is config path.
 	cfgFile := os.Getenv("OWM_CONFIG_FILE")
-	if len(os.Args) > 1 {
-		cfgFile = os.Args[1]
+	var migrateOnly bool
+	for _, a := range os.Args[1:] {
+		if a == "--migrate-only" {
+			migrateOnly = true
+		} else {
+			cfgFile = a
+		}
 	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -72,13 +83,42 @@ func run() error {
 	cancel()
 	log.Info("database connection established")
 
+	// ── Migrations ──────────────────────────────────────────────────────────
+	migrationsPath := cfg.Database.MigrationsDir
+	if migrationsPath == "" {
+		migrationsPath = "migrations"
+	}
+	m, err := migrate.New("file://"+migrationsPath, cfg.Database.DSN)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	defer m.Close()
+	migrateErr := m.Up()
+	if migrateErr != nil && migrateErr != migrate.ErrNoChange {
+		return fmt.Errorf("migrate up: %w", migrateErr)
+	}
+	if migrateErr == migrate.ErrNoChange {
+		log.Info("migrations: no change")
+	} else {
+		log.Info("migrations applied successfully")
+	}
+	if migrateOnly {
+		log.Info("migrate-only mode: exiting")
+		return nil
+	}
+
 	// ── Internal services ─────────────────────────────────────────────────────
 	reg := registry.New(db, log)
 
-	// Stake verifier — Lightning clients are injected via config.
-	// In production these are real LND clients loaded from macaroon paths.
-	// A nil client is acceptable during development; VerifyStake will skip LN checks.
-	verif := stake.New(db, nil, nil, stake.SlashConfig{
+	// Stake verifier — Lightning clients: mock in dev mode, real LND/CLN in production (see coord-T2).
+	var lnReadonly, lnSlash lightning.Client
+	if cfg.DevMode {
+		mockClient := mock.New()
+		lnReadonly = mockClient
+		lnSlash = mockClient
+		log.Info("dev mode: using mock Lightning client for stake verification")
+	}
+	verif := stake.New(db, lnReadonly, lnSlash, stake.SlashConfig{
 		T1AutoSlashSignals: 3,
 		T2T3MaintainerAcks: 2,
 		CooldownDuration:   30 * 24 * time.Hour,
