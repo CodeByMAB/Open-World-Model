@@ -1,10 +1,10 @@
 # Software Requirements Specification (SRS)
 
 **Project:** Open World Model (OWM)
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Date:** 2026-03-05
 **Status:** Draft — Pending Stakeholder Review
-**BRS Reference:** BRS v1.0.0
+**BRS Reference:** BRS v1.1.0
 
 ---
 
@@ -24,6 +24,8 @@
    - 4.8 [Public REST/WebSocket API](#48-public-restwebsocket-api)
    - 4.9 [Governance Portal](#49-governance-portal)
    - 4.10 [Coordinator Service (Bootstrap Layer)](#410-coordinator-service-bootstrap-layer)
+   - 4.11 [Bitcoin Mining Pool (Stratum v2)](#411-bitcoin-mining-pool-stratum-v2)
+   - 4.12 [Proof-of-Stake: Lightning Channel Stake Manager](#412-proof-of-stake-lightning-channel-stake-manager)
 5. [Data Models](#5-data-models)
 6. [API Specifications](#6-api-specifications)
 7. [Security Requirements](#7-security-requirements)
@@ -62,6 +64,11 @@ This document covers all software components of the OWM system: the node daemon,
 | **HMAC** | Hash-based Message Authentication Code |
 | **mTLS** | Mutual TLS — bidirectional certificate authentication |
 | **VRAM** | Video RAM on GPU |
+| **PoW** | Proof-of-Work — hashrate contribution to the OWM Bitcoin mining pool |
+| **PoS** | Proof-of-Stake — Lightning channel capacity locked to the treasury as a joining requirement |
+| **SRI** | Stratum Reference Implementation — open-source Stratum v2 pool software |
+| **FPPS** | Full Pay Per Share — mining payout method where the pool pays a fixed rate per share, absorbing luck variance |
+| **SV2** | Stratum v2 — the modern encrypted Bitcoin mining pool protocol |
 | **sat** | Satoshi — 1/100,000,000th of a Bitcoin |
 
 ### 1.4 References
@@ -110,34 +117,41 @@ OWM is a standalone distributed system composed of:
 ## 3. System Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        OWM Network                                  │
-│                                                                     │
-│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌───────────┐  │
-│  │  Node T3   │   │  Node T2   │   │  Node T1   │   │ Node T1   │  │
-│  │ (server)   │   │(workstation│   │ (consumer) │   │(consumer) │  │
-│  │ OWM Daemon │   │ OWM Daemon │   │ OWM Daemon │   │OWM Daemon │  │
-│  └─────┬──────┘   └─────┬──────┘   └─────┬──────┘   └─────┬─────┘  │
-│        │                │                │                │         │
-│        └────────────────┴────────────────┴────────────────┘         │
-│                                  │                                  │
-│                    ┌─────────────▼──────────────┐                  │
-│                    │    Coordinator Service      │                  │
-│                    │  (Task Router + Registry)   │                  │
-│                    └──────┬──────────────┬───────┘                  │
-│                           │              │                          │
-│             ┌─────────────▼──┐    ┌──────▼───────────┐             │
-│             │  Federated     │    │   Lightning       │             │
-│             │  Ensemble      │    │   Payment Hub     │             │
-│             │  Model Engine  │    │   (Multisig       │             │
-│             └────────────────┘    │    Treasury)      │             │
-│                                   └──────────────┬────┘             │
-│                                                  │                  │
-│             ┌────────────────────────────────────▼────────────┐    │
-│             │              Public API Layer                    │    │
-│             │    REST / WebSocket / GitHub App Integration     │    │
-│             └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              OWM Network                                  │
+│                                                                           │
+│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌───────────┐        │
+│  │  Node T3   │   │  Node T2   │   │  Node T1   │   │ Node T1   │        │
+│  │ (server)   │   │(workstation│   │ (consumer) │   │(consumer) │        │
+│  │ OWM Daemon │   │ OWM Daemon │   │ OWM Daemon │   │OWM Daemon │        │
+│  │ + Mining   │   │ + Mining   │   │ + Mining   │   │           │        │
+│  │ [2M stake] │   │ [500k stk] │   │ [100k stk] │   │[100k stk] │        │
+│  └──┬─────┬───┘   └──┬─────┬───┘   └──┬─────┬───┘   └──┬──────┘         │
+│     │     │          │     │          │     │          │                  │
+│     │  hashrate   hashrate  stake channels (LN→Treasury)                  │
+│     │     │          │     │          │     │          │                  │
+│     │     └──────────┼─────┘          └─────┼──────────┘                 │
+│     │                ▼                       ▼                            │
+│     │   ┌────────────────────┐  ┌───────────────────────┐                │
+│     │   │  OWM Stratum v2    │  │   Coordinator Service  │               │
+│     └──►│  Mining Pool       │  │  (Task Router +        │               │
+│         │  (SRI)             │  │   Registry + PoS Check)│               │
+│         └────────┬───────────┘  └──────┬─────────────┬──┘                │
+│                  │ 20% block reward     │             │                   │
+│                  ▼                      │             │                   │
+│         ┌─────────────────────┐  ┌──────▼──┐  ┌──────▼──────────┐        │
+│         │  Lightning Payment  │  │Federated│  │  Lightning       │        │
+│         │  Hub (Multisig      │◄─┤Ensemble │  │  Stake Manager   │        │
+│         │  Treasury)          │  │Model    │  │  (PoS Enforcement│        │
+│         └──────────┬──────────┘  │Engine   │  │  + Slashing)     │        │
+│                    │             └─────────┘  └──────────────────┘        │
+│                    │ 80% mining + compute rewards                          │
+│                    ▼                                                       │
+│         ┌──────────────────────────────────────────┐                      │
+│         │            Public API Layer               │                      │
+│         │  REST / WebSocket / GitHub App Integration│                      │
+│         └──────────────────────────────────────────┘                      │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 3.1 Key Architectural Principles
@@ -180,14 +194,17 @@ OWM is a standalone distributed system composed of:
 | SRS-NODE-08 | The daemon shall expose a local HTTP health endpoint on `localhost:8080/health` |
 | SRS-NODE-09 | The daemon shall support graceful shutdown, completing in-progress tasks before stopping |
 | SRS-NODE-10 | The daemon shall verify OTS proofs on all model weight updates before loading them |
+| SRS-NODE-11 | On first registration, the daemon shall guide the operator through opening a Lightning channel to the treasury with the required stake amount for their tier |
+| SRS-NODE-12 | The daemon shall monitor its stake channel health and alert the operator if channel capacity falls below the tier minimum (e.g., due to fee depletion) |
+| SRS-NODE-13 | The daemon shall optionally launch a built-in Stratum v2 mining client (`owm-mine`) that points at the OWM pool using the node's identity key |
 
 #### 4.1.3 Node Tier Specifications
 
-| Tier | Minimum VRAM | Minimum RAM | Minimum Bandwidth | Uptime SLA | Base Reward Multiplier |
-|---|---|---|---|---|---|
-| Tier 1 (Consumer) | 8 GB | 16 GB | 50 Mbps | 70% | 1.0x |
-| Tier 2 (Prosumer) | 24 GB | 64 GB | 200 Mbps | 90% | 2.5x |
-| Tier 3 (Server) | 80 GB+ | 256 GB | 1 Gbps | 99% | 8.0x |
+| Tier | Min VRAM | Min RAM | Min Bandwidth | Uptime SLA | Min LN Stake | Base Reward Multiplier |
+|---|---|---|---|---|---|---|
+| Tier 1 (Consumer) | 8 GB | 16 GB | 50 Mbps | 70% | **100,000 sats** | 1.0x |
+| Tier 2 (Prosumer) | 24 GB | 64 GB | 200 Mbps | 90% | **500,000 sats** | 2.5x |
+| Tier 3 (Server) | 80 GB+ | 256 GB | 1 Gbps | 99% | **2,000,000 sats** | 8.0x |
 
 #### 4.1.4 Configuration Schema (`owm.toml`)
 
@@ -335,6 +352,7 @@ reward_sats(node, task) =
     * task_weight(task.type)
     * quality_factor(task.result_score)
     * uptime_bonus(node.uptime_7d)
+    * stake_bonus(node.stake_sats, node.tier)
 
 Where:
   base_rate_sats    = configurable (e.g., 10 sats per compute unit)
@@ -342,6 +360,15 @@ Where:
   task_weight       = {inference: 1.0, fl_round: 3.0, gradient_agg: 5.0}
   quality_factor    = clamp(result_score, 0.0, 1.0)
   uptime_bonus      = 1.0 + max(0, (uptime_7d - 0.9) * 5.0)
+  stake_bonus       = clamp(1.0 + (node.stake_sats - tier_min_sats) / tier_min_sats * 0.5, 1.0, 2.0)
+                      # Ranges from 1.0x (at minimum stake) to 2.0x (at 3x minimum stake)
+                      # Nodes below minimum stake are blocked from receiving tasks
+
+Mining pool reward (per block found):
+  miner_reward_sats = block_subsidy_sats * miner_share_fraction * 0.80
+  treasury_cut_sats = block_subsidy_sats * miner_share_fraction * 0.20
+
+  Where miner_share_fraction = node_valid_shares / total_pool_shares  (FPPS method)
 ```
 
 #### 4.4.3 Functional Requirements
@@ -358,6 +385,10 @@ Where:
 | SRS-LN-08 | GitHub bounty payments shall be triggered by a webhook from the GitHub App upon PR merge |
 | SRS-LN-09 | The treasury multisig wallet shall require 3-of-5 signatures for any on-chain transaction exceeding 0.01 BTC |
 | SRS-LN-10 | The system shall expose a `/payments/history` API endpoint for node operators to audit their earnings |
+| SRS-LN-11 | The coordinator shall query the treasury LN node to verify that a registering node's channel exists and meets the tier-minimum capacity before granting active status |
+| SRS-LN-12 | Upon slashing decision, the stake manager shall call the LN node's `ForceCloseChan` RPC for the offending node's channel ID |
+| SRS-LN-13 | All slashing events shall be logged immutably with: node ID, channel ID, reason, evidence hash, timestamp, and coordinator signature |
+| SRS-LN-14 | Mining pool FPPS rewards shall be dispatched to miners via Lightning within 60 minutes of each Bitcoin block confirmation, using the node's registered LN URI |
 
 ---
 
@@ -537,6 +568,17 @@ GET    /v1/network/nodes            # List active nodes (anonymized)
 GET    /v1/payments/invoice         # Generate Lightning invoice for API access
 GET    /v1/payments/history         # Node operator earnings history
 
+# Mining Pool
+GET    /v1/mining/stats             # Pool-wide hashrate, miners, blocks found
+GET    /v1/mining/nodes/{node_id}   # Node's mining stats and earnings
+GET    /v1/mining/payouts           # Recent payout history (public)
+GET    /v1/mining/dashboard         # WebSocket feed for live pool metrics
+
+# Stake
+GET    /v1/stake/requirements       # Tier stake minimums
+GET    /v1/stake/nodes/{node_id}    # Node stake status and channel info
+GET    /v1/network/slashing-log     # Public immutable slashing event log
+
 # Governance
 GET    /v1/governance/proposals     # List governance proposals
 POST   /v1/governance/proposals     # Submit a new proposal (authenticated)
@@ -617,6 +659,161 @@ POST   /v1/governance/proposals/{id}/comment  # Comment on a proposal
 
 ---
 
+### 4.11 Bitcoin Mining Pool (Stratum v2)
+
+**Language:** Rust (SRI — Stratum Reference Implementation, extended)
+**Package:** `owm-pool`
+
+#### 4.11.1 Responsibilities
+
+- Accept hashrate connections from OWM nodes and external ASIC/GPU miners via Stratum v2.
+- Distribute work templates to miners using Bitcoin's getblocktemplate RPC.
+- Validate submitted shares and compute FPPS payouts.
+- Dispatch 80% of block rewards to miners via Lightning; deposit 20% to treasury.
+- Publish real-time hashrate, share difficulty, and payout history on a public dashboard.
+
+#### 4.11.2 Functional Requirements
+
+| ID | Requirement |
+|---|---|
+| SRS-POOL-01 | The pool shall implement the Stratum v2 protocol (SRI codebase) with end-to-end encryption (Noise protocol handshake) |
+| SRS-POOL-02 | Miners shall authenticate to the pool using their OWM Ed25519 node identity key, linking mining contributions to their node profile |
+| SRS-POOL-03 | The pool shall support GPU software miners (e.g., `lolMiner`, `TeamRedMiner`, via Stratum v2 proxy) and ASIC miners with native SV2 firmware |
+| SRS-POOL-04 | The pool shall use FPPS payout: each valid share earns `(block_subsidy / pool_difficulty) * 0.80` satoshis regardless of whether the pool finds the block |
+| SRS-POOL-05 | The pool shall connect to a Bitcoin full node (Bitcoin Core) via getblocktemplate for work generation |
+| SRS-POOL-06 | Share validation shall occur within 100ms of submission; invalid shares shall be logged with reason code |
+| SRS-POOL-07 | Accumulated miner balances shall be paid out via Lightning once they exceed a configurable threshold (default: 10,000 sats) or on a 1-hour timer, whichever comes first |
+| SRS-POOL-08 | The treasury shall receive its 20% cut in the same Lightning payment batch as miner payouts, directed to the treasury's own LN node |
+| SRS-POOL-09 | The pool shall expose a WebSocket API for real-time metrics: hashrate per miner, pool total hashrate, shares accepted/rejected, estimated earnings |
+| SRS-POOL-10 | The pool dashboard (`pool.owm.network`) shall display: pool hashrate (1h/24h), total miners, blocks found (last 30 days), current difficulty, FPPS rate, recent payouts |
+| SRS-POOL-11 | The pool shall maintain a share database (PostgreSQL) retaining 30 days of share history for dispute resolution |
+
+#### 4.11.3 Mining Node Integration (`owm-mine`)
+
+The OWM node daemon includes an optional built-in mining client that connects to the pool:
+
+```toml
+# owm.toml — mining section
+[mining]
+enabled = true
+pool_url = "stratum2+tcp://pool.owm.network:3333"
+# Node identity key is used automatically for pool authentication
+worker_name = "my-node-gpu0"
+intensity = 80          # GPU utilization % (0–100)
+```
+
+```bash
+# Standalone mining client (for ASIC operators)
+owm-mine --pool stratum2+tcp://pool.owm.network:3333 \
+          --identity ~/.owm/identity.key \
+          --worker asic-rack-1
+```
+
+#### 4.11.4 Pool Architecture
+
+```
+Bitcoin Full Node (Core)
+        │ getblocktemplate
+        ▼
+┌──────────────────────────────┐
+│   OWM Pool (SRI-based)       │
+│  ┌──────────┐ ┌───────────┐  │
+│  │  Template│ │  Share    │  │
+│  │  Provider│ │  Validator│  │
+│  └──────────┘ └─────┬─────┘  │
+│  ┌──────────────────▼──────┐  │
+│  │    FPPS Payout Engine   │  │
+│  │  80% → miners (LN)      │  │
+│  │  20% → treasury (LN)    │  │
+│  └─────────────────────────┘  │
+│  ┌──────────────────────────┐  │
+│  │  Dashboard & Metrics API │  │
+│  └──────────────────────────┘  │
+└──────────────────────────────┘
+        │ Stratum v2 (encrypted)
+        ▼
+   Mining Nodes (GPU/ASIC)
+```
+
+---
+
+### 4.12 Proof-of-Stake: Lightning Channel Stake Manager
+
+**Language:** Python 3.11
+**Package:** `owm.stake`
+
+#### 4.12.1 Responsibilities
+
+- Verify that a registering node has opened a qualifying Lightning channel to the treasury.
+- Monitor existing node channels for health and capacity compliance.
+- Execute slashing (force-close) on confirmed misbehaving nodes.
+- Manage the 30-day re-stake cooldown for slashed nodes.
+- Provide a transparent public log of all slashing events.
+
+#### 4.12.2 Stake Verification Flow
+
+```
+Node Registration Request
+         │
+         ▼
+1. Coordinator receives RegisterNodeRequest with declared tier
+2. Stake Manager queries treasury LND:
+   ListChannels(peer_pubkey = node.public_key)
+3. Check: channel exists AND local_balance >= tier_min_sats
+         │
+    ┌────┴────────────────────────────────┐
+    │ PASS                                │ FAIL
+    ▼                                     ▼
+Node granted "pending" status        Return REGISTRATION_FAILED
+Coordinator sends funding invoice    with INSUFFICIENT_STAKE error
+(channel open instructions)          and minimum required amount
+    │
+    ▼
+Channel confirmed on-chain (≥1 block)
+    │
+    ▼
+Node status → "active"
+Tasks begin flowing, rewards enabled
+```
+
+#### 4.12.3 Slashing Decision Flow
+
+```
+Misbehavior Signal Received
+(e.g., poisoned gradient, fake task proof)
+         │
+         ▼
+1. Anomaly detector flags node with evidence hash
+2. Stake Manager logs evidence to immutable slashing log
+3. For Tier 1 nodes: automated slashing after 3 confirmed signals
+   For Tier 2/3 nodes: requires 2 maintainer acknowledgments
+4. Stake Manager calls LND ForceCloseChan(channel_id)
+5. Node status → "suspended"
+6. Cooldown timer starts: 30 days
+7. Slashing event published to public slashing log
+8. Node operator notified via registered contact (if provided)
+         │
+         ▼ (after 30-day cooldown)
+Node may re-register and open a new stake channel
+```
+
+#### 4.12.4 Functional Requirements
+
+| ID | Requirement |
+|---|---|
+| SRS-STAKE-01 | The stake manager shall verify channel existence and capacity via the treasury LN node's `ListChannels` RPC before granting active status |
+| SRS-STAKE-02 | The stake manager shall re-verify all active node channels every 6 hours; nodes whose channel capacity drops below minimum shall be moved to "degraded" status and notified |
+| SRS-STAKE-03 | Nodes in "degraded" status have 24 hours to restore channel capacity before being suspended (no slashing — just suspension) |
+| SRS-STAKE-04 | Slashing shall require a minimum of 3 independent anomaly signals for Tier 1, or 2 maintainer acknowledgments for Tier 2/3 |
+| SRS-STAKE-05 | Force-close shall be executed by calling `ForceCloseChan` on the treasury LN node; the channel ID is retrieved from the node's registration record |
+| SRS-STAKE-06 | A public, immutable slashing log shall be maintained at `GET /v1/network/slashing-log`; each entry includes node ID (pseudonymous), channel ID, evidence hash, date, and slashing reason |
+| SRS-STAKE-07 | The 30-day cooldown shall be enforced by rejecting registration requests from a node's public key until the cooldown expires |
+| SRS-STAKE-08 | A voluntary cooperative channel close shall not trigger slashing or cooldown; the node is simply deregistered |
+| SRS-STAKE-09 | The stake manager shall expose internal metrics to Prometheus: active channels, total sats staked, slashing events (7d), degraded nodes |
+| SRS-STAKE-10 | The stake bonus in reward calculation shall be re-computed whenever a node's channel capacity changes |
+
+---
+
 ## 5. Data Models
 
 ### 5.1 Node
@@ -673,7 +870,59 @@ class ModelVersion:
     is_current: bool
 ```
 
-### 5.4 Bounty
+### 5.4 NodeStake
+
+```python
+@dataclass
+class NodeStake:
+    node_id: str
+    channel_id: str                 # LN channel ID (hex)
+    channel_capacity_sats: int      # Total channel capacity
+    local_balance_sats: int         # Node's locked sats (their stake)
+    tier_minimum_sats: int          # Required minimum for declared tier
+    stake_bonus_multiplier: float   # Computed: 1.0 – 2.0
+    status: Literal["active", "degraded", "force_closed"]
+    opened_at: datetime
+    last_verified_at: datetime
+    degraded_since: Optional[datetime]
+```
+
+### 5.5 SlashingEvent
+
+```python
+@dataclass
+class SlashingEvent:
+    event_id: str
+    node_id: str                    # Pseudonymous (public key hash)
+    channel_id: str
+    tier: Literal["t1", "t2", "t3"]
+    reason: str                     # "poisoned_gradient" | "fake_task_proof" | etc.
+    evidence_hash: str              # SHA-256 of evidence bundle
+    signal_count: int               # Number of anomaly signals
+    executed_at: datetime
+    cooldown_expires_at: datetime
+    coordinator_signature: str
+```
+
+### 5.6 MiningContribution
+
+```python
+@dataclass
+class MiningContribution:
+    contribution_id: str
+    node_id: str
+    worker_name: str
+    valid_shares: int
+    invalid_shares: int
+    hashrate_ghs: float             # Gigahashes per second (average over window)
+    period_start: datetime
+    period_end: datetime
+    earned_sats: int                # FPPS earnings for this period
+    payment_status: Literal["pending", "paid", "failed"]
+    payment_preimage: Optional[str]
+```
+
+### 5.8 Bounty
 
 ```python
 @dataclass
@@ -760,6 +1009,10 @@ message TaskResult {
 | SRS-SEC-10 | A CVE scanning CI step shall run on every PR using `pip-audit`, `cargo-audit`, and `trivy` |
 | SRS-SEC-11 | Nodes flagged for malicious behavior (poisoned gradients, fake task proofs) shall be suspended and their reputation score set to 0 |
 | SRS-SEC-12 | The multisig treasury shall use hardware wallets (Coldcard or Trezor) for all signing operations |
+| SRS-SEC-13 | Force-close (slashing) shall only be executable by the coordinator service using a dedicated, access-controlled LN RPC credential separate from the payment credential |
+| SRS-SEC-14 | Slashing decisions for Tier 2 and Tier 3 nodes shall require signed acknowledgment from at least 2 core maintainers before `ForceCloseChan` is called |
+| SRS-SEC-15 | The mining pool shall validate that submitted shares reference the current work template; stale or fabricated shares shall be rejected immediately |
+| SRS-SEC-16 | The Stratum v2 Noise protocol handshake shall be enforced; plain-text Stratum v1 connections shall be rejected |
 
 ---
 
@@ -777,6 +1030,10 @@ message TaskResult {
 | SRS-PERF-08 | Maximum concurrent API requests | 1,000 |
 | SRS-PERF-09 | Task scheduler dispatch latency | < 1 second |
 | SRS-PERF-10 | OTS calendar submission acknowledgment | < 30 seconds |
+| SRS-PERF-11 | Mining pool share validation latency | < 100 ms |
+| SRS-PERF-12 | Mining pool FPPS payout dispatch after block confirmation | < 60 minutes |
+| SRS-PERF-13 | Stake channel verification during node registration | < 5 seconds |
+| SRS-PERF-14 | Periodic stake channel re-verification (all active nodes) | Complete within 10 minutes per 6-hour cycle |
 
 ---
 
@@ -792,6 +1049,8 @@ message TaskResult {
 | Load tests | `locust` | API: 1,000 concurrent users |
 | Security tests | `bandit`, `semgrep`, `trivy` | 0 high-severity findings in main |
 | Fuzz tests | `atheris` (Python) | gRPC input parsing, data adapters |
+| PoS slashing tests | Custom test suite + LND regtest | Force-close flows, cooldown enforcement |
+| Mining pool tests | SRI test harness + Bitcoin regtest | Share validation, FPPS calculation, LN payouts |
 | FL adversarial tests | Custom test suite | Gradient poisoning detection |
 | Lightning payment tests | LND testnet (regtest) | All payment flows |
 | OTS tests | OTS test calendar | Proof generation and verification |
@@ -810,6 +1069,16 @@ message TaskResult {
 | TST-08 | Node submits fake task completion proof; coordinator rejects it | Security |
 | TST-09 | Contributor submits PII-containing dataset; pipeline rejects it | Data quality |
 | TST-10 | Treasury proposal created, comment period elapses, multisig executes payment | Governance |
+| TST-11 | Node registers without opening stake channel; coordinator rejects with INSUFFICIENT_STAKE | Integration (PoS) |
+| TST-12 | Node opens stake channel at tier minimum; coordinator grants active status; stake bonus = 1.0x | Integration (PoS) |
+| TST-13 | Node opens channel at 3x tier minimum; stake bonus computed as 2.0x (cap); reward multiplier verified | Integration (PoS) |
+| TST-14 | Node channel balance drops below minimum; node receives degraded warning; 24h elapses; node suspended (no slash) | Fault tolerance (PoS) |
+| TST-15 | Node submits 3 poisoned gradients; slashing triggered; `ForceCloseChan` called; node suspended; cooldown recorded | Security (Slashing) |
+| TST-16 | Slashed node attempts re-registration before 30-day cooldown; coordinator rejects | Security (Slashing) |
+| TST-17 | GPU mining node connects to OWM pool via Stratum v2; submits valid shares; FPPS payout dispatched via Lightning | Integration (PoW) |
+| TST-18 | Pool finds a block; 80% LN payment to miner dispatched within 60 minutes; 20% credited to treasury | Integration (PoW) |
+| TST-19 | Miner submits share referencing stale template; pool rejects with STALE_WORK error | Security (PoW) |
+| TST-20 | Tier 2 node misbehaves; slashing requires 2 maintainer acknowledgments; proceeds only after both sign | Security (Slashing) |
 
 ### 9.3 CI/CD Pipeline
 
@@ -842,6 +1111,9 @@ Services:
   - minio:              Model artifact storage (100 GB initial)
   - ots-calendar:       OWM's own OTS calendar server
   - lnd:                Lightning Network Daemon (mainnet)
+  - bitcoin-core:       Bitcoin full node (for mining pool getblocktemplate)
+  - owm-pool:           Stratum v2 mining pool (SRI-based, Rust)
+  - owm-stake:          Lightning channel stake manager
   - api-gateway:        nginx + TLS termination
   - governance-portal:  1 replica, 1 CPU, 2 GB RAM
 ```
@@ -893,6 +1165,9 @@ docker run -d \
 | License | `LICENSE` | All users |
 | Changelog | `CHANGELOG.md` | All users |
 | OTS verification guide | `docs/ots-verification.md` | All users |
+| Mining pool setup guide | `docs/mining-pool.md` | Mining node operators |
+| Proof-of-Stake guide | `docs/proof-of-stake.md` | All node operators |
+| Slashing & appeals process | `docs/slashing.md` | Node operators, community |
 
 All public-facing Python code shall include:
 - Module-level docstrings describing purpose.
@@ -916,6 +1191,9 @@ All public-facing Python code shall include:
 | gRPC | `grpcio` / native Go | Latest | Node-coordinator protocol |
 | Lightning | LND + `lnd-grpc` Python client | Latest LND | Widely deployed, robust |
 | Lightning (Rust) | LDK | Latest | For embedded node support |
+| Mining Pool | SRI (Stratum Reference Implementation) | Latest | Stratum v2 pool; Rust-based; open-source |
+| Bitcoin Full Node | Bitcoin Core | 27+ | getblocktemplate for pool work generation |
+| Mining Client (built-in) | Custom Stratum v2 client | — | Embedded in node daemon for GPU mining |
 | Database | PostgreSQL | 16+ | Reliability, JSONB support |
 | Cache / Queue | Redis | 7+ | Task queue, rate limiting |
 | Object Storage | MinIO (self-hosted) / S3 | Latest | Model artifact storage |
@@ -947,6 +1225,8 @@ Open-World-Model/
 │   │   │   ├── node/               # Node daemon core
 │   │   │   ├── model/              # Federated ensemble model engine
 │   │   │   ├── lightning/          # LN payment integration
+│   │   │   ├── stake/              # PoS stake manager (channel verification, slashing)
+│   │   │   ├── mine/               # Built-in Stratum v2 mining client
 │   │   │   ├── provenance/         # OpenTimestamps integration
 │   │   │   ├── data/               # Data pipeline & adapters
 │   │   │   ├── github/             # GitHub integration service
@@ -955,9 +1235,19 @@ Open-World-Model/
 │   ├── tests/
 │   │   ├── unit/
 │   │   ├── integration/
-│   │   └── adversarial/            # FL poisoning tests
+│   │   ├── adversarial/            # FL poisoning tests
+│   │   └── slashing/               # PoS force-close and cooldown tests
 │   ├── Dockerfile
 │   ├── pyproject.toml
+│   └── Cargo.toml
+├── owm-pool/                       # Bitcoin mining pool (Rust, SRI-based)
+│   ├── src/
+│   │   ├── pool/                   # Stratum v2 pool core
+│   │   ├── fpps/                   # FPPS payout engine
+│   │   ├── dashboard/              # WebSocket metrics API
+│   │   └── payout/                 # Lightning payout dispatcher
+│   ├── tests/
+│   ├── Dockerfile
 │   └── Cargo.toml
 ├── owm-coordinator/                # Coordinator service (Go)
 │   ├── cmd/coordinator/
