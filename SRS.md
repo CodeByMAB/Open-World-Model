@@ -680,7 +680,7 @@ POST   /v1/governance/proposals/{id}/comment  # Comment on a proposal
 | SRS-POOL-02 | Miners shall authenticate to the pool using their OWM Ed25519 node identity key, linking mining contributions to their node profile |
 | SRS-POOL-03 | The pool shall support GPU software miners (e.g., `lolMiner`, `TeamRedMiner`, via Stratum v2 proxy) and ASIC miners with native SV2 firmware |
 | SRS-POOL-04 | The pool shall use FPPS payout: each valid share earns `(block_subsidy / pool_difficulty) * 0.80` satoshis regardless of whether the pool finds the block |
-| SRS-POOL-05 | The pool shall connect to a Bitcoin full node (Bitcoin Core) via getblocktemplate for work generation |
+| SRS-POOL-05 | The pool shall connect to a Bitcoin full node via getblocktemplate for work generation; both Bitcoin Core and Bitcoin Knots are supported |
 | SRS-POOL-06 | Share validation shall occur within 100ms of submission; invalid shares shall be logged with reason code |
 | SRS-POOL-07 | Accumulated miner balances shall be paid out via Lightning once they exceed a configurable threshold (default: 10,000 sats) or on a 1-hour timer, whichever comes first |
 | SRS-POOL-08 | The treasury shall receive its 20% cut in the same Lightning payment batch as miner payouts, directed to the treasury's own LN node |
@@ -700,6 +700,10 @@ pool_url = "stratum2+tcp://pool.owm.network:3333"
 # Node identity key is used automatically for pool authentication
 worker_name = "my-node-gpu0"
 intensity = 80          # GPU utilization % (0–100)
+
+# For pool operators running a local full node:
+# bitcoin_rpc_url = "http://127.0.0.1:8332"
+# Supports Bitcoin Core 27+ and Bitcoin Knots 27+ (same RPC interface)
 ```
 
 ```bash
@@ -712,7 +716,7 @@ owm-mine --pool stratum2+tcp://pool.owm.network:3333 \
 #### 4.11.4 Pool Architecture
 
 ```
-Bitcoin Full Node (Core)
+Bitcoin Full Node (Core or Knots)
         │ getblocktemplate
         ▼
 ┌──────────────────────────────┐
@@ -1111,7 +1115,7 @@ Services:
   - minio:              Model artifact storage (100 GB initial)
   - ots-calendar:       OWM's own OTS calendar server
   - lnd:                Lightning Network Daemon (mainnet)
-  - bitcoin-core:       Bitcoin full node (for mining pool getblocktemplate)
+  - bitcoin-node:       Bitcoin full node — Bitcoin Core 27+ or Bitcoin Knots 27+ (operator's choice)
   - owm-pool:           Stratum v2 mining pool (SRI-based, Rust)
   - owm-stake:          Lightning channel stake manager
   - api-gateway:        nginx + TLS termination
@@ -1192,7 +1196,7 @@ All public-facing Python code shall include:
 | Lightning | LND + `lnd-grpc` Python client | Latest LND | Widely deployed, robust |
 | Lightning (Rust) | LDK | Latest | For embedded node support |
 | Mining Pool | SRI (Stratum Reference Implementation) | Latest | Stratum v2 pool; Rust-based; open-source |
-| Bitcoin Full Node | Bitcoin Core | 27+ | getblocktemplate for pool work generation |
+| Bitcoin Full Node | Bitcoin Core 27+ **or** Bitcoin Knots 27+ | 27+ | getblocktemplate for pool work generation; operator's choice |
 | Mining Client (built-in) | Custom Stratum v2 client | — | Embedded in node daemon for GPU mining |
 | Database | PostgreSQL | 16+ | Reliability, JSONB support |
 | Cache / Queue | Redis | 7+ | Task queue, rate limiting |

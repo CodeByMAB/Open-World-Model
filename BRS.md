@@ -285,6 +285,7 @@ The Lightning channel stake acts as OWM's native Proof-of-Stake mechanism — en
 | ASS-04 | The initial core team has access to at least 5 server-grade GPU nodes for bootstrapping. |
 | ASS-05 | A Lightning node (LND or CLN) will be operated by the treasury to manage payments. |
 | ASS-06 | Stratum v2 pool software (e.g., SRI — Stratum Reference Implementation) is mature enough for production use by Phase 2. |
+| ASS-09 | Operators may run either Bitcoin Core or Bitcoin Knots as their full node; both expose the same getblocktemplate RPC interface required by the OWM mining pool. |
 | ASS-07 | Node operators joining at Tier 1 have access to at least 100,000 sats (≈ $50–$100 at time of writing) to open their stake channel. |
 | ASS-08 | Force-close mechanics in Lightning are well-understood and reliably punish the counterparty who broadcasts an outdated state. |
 
