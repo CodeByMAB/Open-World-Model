@@ -177,6 +177,7 @@ message GradientUpdate {
   bytes  gradient_data = 3; // compressed sparse gradient delta
   string gradient_hash = 4; // SHA-256 of gradient_data
   bytes  signature     = 5; // Ed25519 sig over (round_number + gradient_hash)
+  string s3_url        = 6; // S3 object URL for gradient blob (key-only after validation)
 }
 
 message GradientAck {

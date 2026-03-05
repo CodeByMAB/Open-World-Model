@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
+	"github.com/owmnetwork/owm-coordinator/internal/metrics"
 )
 
 // TierMinimums maps hardware tier to the minimum Lightning channel capacity
@@ -65,8 +66,8 @@ func New(db *pgxpool.Pool, lnReadonly, lnSlash lightning.Client, cfg SlashConfig
 // VerifyStake checks whether the node identified by pubKeyHex has an open
 // Lightning channel to the treasury that meets the minimum capacity for tier.
 // This is called during node registration (SRS-STAKE-01, SRS-LN-11).
-// When lnReadonly is nil (e.g. dev mode without mock), returns a synthetic OK
-// result so registration can proceed; callers should prefer injecting a mock client.
+// When lnReadonly is nil (e.g. dev mode or misconfiguration), returns OK: false
+// with a configuration error; callers must inject a real or mock client for stake checks.
 func (v *Verifier) VerifyStake(ctx context.Context, pubKeyHex, tier string) (*StakeResult, error) {
 	tierMin, ok := TierMinimums[tier]
 	if !ok {
@@ -74,14 +75,11 @@ func (v *Verifier) VerifyStake(ctx context.Context, pubKeyHex, tier string) (*St
 	}
 
 	if v.lnReadonly == nil {
-		// Nil-guard: no LN client (dev mode). Return synthetic OK for persistence.
+		metrics.OwmStakeVerificationsTotal.WithLabelValues("fail").Inc()
 		return &StakeResult{
-			OK:               true,
-			ChannelID:        "dev-no-ln-client",
-			CapacitySats:     tierMin,
-			LocalBalanceSats: tierMin,
-			TierMinimumSats:  tierMin,
-			BonusMultiplier:  1.0,
+			OK:              false,
+			TierMinimumSats: tierMin,
+			Error:           "LN client not configured (dev_mode?)",
 		}, nil
 	}
 
@@ -102,6 +100,7 @@ func (v *Verifier) VerifyStake(ctx context.Context, pubKeyHex, tier string) (*St
 	}
 
 	if best == nil {
+		metrics.OwmStakeVerificationsTotal.WithLabelValues("fail").Inc()
 		return &StakeResult{
 			OK:              false,
 			TierMinimumSats: tierMin,
@@ -109,6 +108,7 @@ func (v *Verifier) VerifyStake(ctx context.Context, pubKeyHex, tier string) (*St
 		}, nil
 	}
 
+	metrics.OwmStakeVerificationsTotal.WithLabelValues("ok").Inc()
 	bonus := computeBonus(best.LocalBalanceSats, tierMin)
 	return &StakeResult{
 		OK:               true,
@@ -224,6 +224,10 @@ func (v *Verifier) RecordMisbehaviorSignal(ctx context.Context, nodeID uuid.UUID
 // Slash force-closes the node's stake channel and suspends the node.
 // For T2/T3 nodes this must be called only after maintainer acknowledgment.
 func (v *Verifier) Slash(ctx context.Context, nodeID uuid.UUID, tier, reason, evidenceHash string, signalCount int) error {
+	if v.lnSlash == nil {
+		return fmt.Errorf("cannot slash: Lightning slashing client is nil (dev mode or misconfiguration)")
+	}
+
 	// Fetch channel ID from stake record.
 	var channelID string
 	err := v.db.QueryRow(ctx,
@@ -239,9 +243,6 @@ func (v *Verifier) Slash(ctx context.Context, nodeID uuid.UUID, tier, reason, ev
 		zap.String("reason", reason),
 	)
 
-	if v.lnSlash == nil {
-		return fmt.Errorf("cannot slash: Lightning slashing client is nil (dev mode or misconfiguration)")
-	}
 	// Force-close via the restricted slashing LND credential (SRS-SEC-13).
 	if err := v.lnSlash.ForceCloseChan(ctx, channelID); err != nil {
 		return fmt.Errorf("force-closing channel %s: %w", channelID, err)
@@ -280,6 +281,7 @@ func (v *Verifier) Slash(ctx context.Context, nodeID uuid.UUID, tier, reason, ev
 		eventID, nodeID,
 	)
 
+	metrics.OwmSlashEventsTotal.WithLabelValues(tier).Inc()
 	v.log.Info("node slashed",
 		zap.String("node_id", nodeID.String()),
 		zap.String("event_id", eventID.String()),

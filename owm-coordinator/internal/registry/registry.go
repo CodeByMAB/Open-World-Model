@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+
+	"github.com/owmnetwork/owm-coordinator/internal/metrics"
 )
 
 // Tier constants match the BRS-defined hardware tiers.
@@ -126,6 +128,7 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 		return nil, fmt.Errorf("upserting node: %w", err)
 	}
 
+	metrics.OwmNodesTotal.WithLabelValues(node.Tier, node.Status).Inc()
 	r.log.Info("node registered", zap.String("node_id", node.NodeID.String()), zap.String("tier", node.Tier))
 	return node, nil
 }
@@ -203,10 +206,18 @@ func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 
 // UpdateStatus sets a node's status directly. Used by the stake manager.
 func (r *Registry) UpdateStatus(ctx context.Context, nodeID uuid.UUID, status string) error {
+	var tier, oldStatus string
+	_ = r.db.QueryRow(ctx, `SELECT tier, status FROM nodes WHERE node_id = $1`, nodeID).Scan(&tier, &oldStatus)
 	_, err := r.db.Exec(ctx,
 		`UPDATE nodes SET status = $1 WHERE node_id = $2`,
 		status, nodeID,
 	)
+	if err == nil && tier != "" {
+		if oldStatus != "" {
+			metrics.OwmNodesTotal.WithLabelValues(tier, oldStatus).Dec()
+		}
+		metrics.OwmNodesTotal.WithLabelValues(tier, status).Inc()
+	}
 	return err
 }
 

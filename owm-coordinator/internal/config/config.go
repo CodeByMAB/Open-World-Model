@@ -17,6 +17,7 @@ type Config struct {
 	Database  DatabaseConfig
 	Redis     RedisConfig
 	Lightning LightningConfig
+	S3        S3Config
 	FL        FLConfig
 	Stake     StakeConfig
 	Tor       TorConfig
@@ -46,11 +47,27 @@ type RedisConfig struct {
 }
 
 type LightningConfig struct {
-	LNDHost            string // e.g. "localhost:10009"
-	PaymentMacaroonPath string
+	Backend              string // "lnd" | "cln", default "lnd"
+	LNDHost              string // e.g. "localhost:10009"
+	PaymentMacaroonPath  string
 	ReadonlyMacaroonPath string
 	SlashingMacaroonPath string
-	TLSCertPath         string
+	TLSCertPath          string
+	CLN                  CLNConfig
+}
+
+// CLNConfig holds Core Lightning REST API settings.
+type CLNConfig struct {
+	BaseURL string // e.g. "https://cln:9745"
+	APIKey  string
+}
+
+type S3Config struct {
+	Endpoint  string
+	Bucket    string
+	AccessKey string
+	SecretKey string
+	Region    string
 }
 
 type FLConfig struct {
@@ -130,6 +147,7 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 	v.SetDefault("dev_mode", false)
+	v.SetDefault("lightning.backend", "lnd")
 
 	// Environment variable binding (OWM_SERVER_GRPC_ADDR, etc.)
 	v.SetEnvPrefix("OWM")
@@ -162,18 +180,38 @@ func (c *Config) validate() error {
 	}
 	// In dev mode, Lightning credentials are optional (mock client is used).
 	if !c.DevMode {
-		if c.Lightning.LNDHost == "" {
-			return fmt.Errorf("lightning.lnd_host (OWM_LIGHTNING_LND_HOST) is required (set OWM_DEV_MODE=true to use mock)")
+		backend := strings.ToLower(strings.TrimSpace(c.Lightning.Backend))
+		if backend == "" {
+			backend = "lnd"
 		}
-		if c.Lightning.PaymentMacaroonPath == "" {
-			return fmt.Errorf("lightning.payment_macaroon_path is required")
+		switch backend {
+		case "lnd":
+			if c.Lightning.LNDHost == "" {
+				return fmt.Errorf("lightning.lnd_host (OWM_LIGHTNING_LND_HOST) is required for backend lnd (set OWM_DEV_MODE=true to use mock)")
+			}
+			if c.Lightning.PaymentMacaroonPath == "" {
+				return fmt.Errorf("lightning.payment_macaroon_path is required for backend lnd")
+			}
+			if c.Lightning.ReadonlyMacaroonPath == "" {
+				return fmt.Errorf("lightning.readonly_macaroon_path is required for backend lnd")
+			}
+			if c.Lightning.SlashingMacaroonPath == "" {
+				return fmt.Errorf("lightning.slashing_macaroon_path is required for backend lnd")
+			}
+		case "cln":
+			if c.Lightning.CLN.BaseURL == "" {
+				return fmt.Errorf("lightning.cln.base_url is required for backend cln")
+			}
+			if c.Lightning.CLN.APIKey == "" {
+				return fmt.Errorf("lightning.cln.api_key is required for backend cln")
+			}
+		default:
+			return fmt.Errorf("lightning.backend must be 'lnd' or 'cln', got %q", c.Lightning.Backend)
 		}
-		if c.Lightning.ReadonlyMacaroonPath == "" {
-			return fmt.Errorf("lightning.readonly_macaroon_path is required")
-		}
-		if c.Lightning.SlashingMacaroonPath == "" {
-			return fmt.Errorf("lightning.slashing_macaroon_path is required")
-		}
+	}
+	// mTLS: when TLS is used in production, CA cert is required for client verification.
+	if c.Server.TLSCertFile != "" && !c.DevMode && c.Server.CACertFile == "" {
+		return fmt.Errorf("server.ca_cert_file is required when TLS is enabled in production (for mTLS node authentication)")
 	}
 	return nil
 }

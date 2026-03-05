@@ -4,12 +4,17 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/hex"
 	"fmt"
+	"net/url"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -17,6 +22,8 @@ import (
 	coordinatorv1 "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1"
 
 	"github.com/owmnetwork/owm-coordinator/internal/fl"
+	"github.com/owmnetwork/owm-coordinator/internal/metrics"
+	"github.com/owmnetwork/owm-coordinator/internal/payment"
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
 	"github.com/owmnetwork/owm-coordinator/internal/scheduler"
 	stakeVerifier "github.com/owmnetwork/owm-coordinator/internal/stake"
@@ -36,6 +43,8 @@ type Server struct {
 	scheduler *scheduler.Scheduler
 	verifier  *stakeVerifier.Verifier
 	fl        *fl.Orchestrator
+	disp      *payment.Dispatcher
+	rdb       *redis.Client
 	db        *pgxpool.Pool
 	log       *zap.Logger
 }
@@ -46,6 +55,8 @@ func New(
 	sched *scheduler.Scheduler,
 	verif *stakeVerifier.Verifier,
 	flOrch *fl.Orchestrator,
+	disp *payment.Dispatcher,
+	rdb *redis.Client,
 	db *pgxpool.Pool,
 	log *zap.Logger,
 ) *Server {
@@ -54,6 +65,8 @@ func New(
 		scheduler: sched,
 		verifier:  verif,
 		fl:        flOrch,
+		disp:      disp,
+		rdb:       rdb,
 		db:        db,
 		log:       log,
 	}
@@ -159,17 +172,59 @@ func (s *Server) DeregisterNode(ctx context.Context, req *coordinatorv1.Deregist
 
 // ─── Task streaming ──────────────────────────────────────────────────────────
 
+// streamTaskPayload is the JSON shape published by the scheduler (Assignment).
+type streamTaskPayload struct {
+	TaskID      string `json:"TaskID"`
+	NodeID      string `json:"NodeID"`
+	TaskType    string `json:"TaskType"`
+	RewardSats  int64  `json:"RewardSats"`
+	TimeoutSecs int    `json:"TimeoutSecs"`
+}
+
 // StreamTasks opens a server-side stream and pushes Task messages to the node.
 // The node keeps this stream open for the duration of its session.
 func (s *Server) StreamTasks(req *coordinatorv1.HeartbeatRequest, stream coordinatorv1.CoordinatorService_StreamTasksServer) error {
 	nodeID := req.NodeId
+	if _, err := uuid.Parse(nodeID); err != nil {
+		return status.Errorf(codes.InvalidArgument, "invalid node_id: %v", err)
+	}
 	s.log.Info("task stream opened", zap.String("node_id", nodeID))
 
-	// Scaffold: block until context is cancelled (real impl polls a Redis task queue
-	// and pushes tasks as they are scheduled for this node).
-	<-stream.Context().Done()
-	s.log.Info("task stream closed", zap.String("node_id", nodeID))
-	return nil
+	if s.rdb == nil {
+		<-stream.Context().Done()
+		s.log.Info("task stream closed (no redis)", zap.String("node_id", nodeID))
+		return nil
+	}
+
+	sub := s.rdb.Subscribe(stream.Context(), "owm:tasks:"+nodeID)
+	defer sub.Close()
+
+	ch := sub.Channel()
+	for {
+		select {
+		case <-stream.Context().Done():
+			s.log.Info("task stream closed", zap.String("node_id", nodeID))
+			return nil
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			var payload streamTaskPayload
+			if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+				s.log.Warn("stream task unmarshal failed", zap.String("payload", msg.Payload), zap.Error(err))
+				continue
+			}
+			task := &coordinatorv1.Task{
+				TaskId:         payload.TaskID,
+				TaskType:       payload.TaskType,
+				TimeoutSeconds: int32(payload.TimeoutSecs),
+				RewardSats:     payload.RewardSats,
+			}
+			if err := stream.Send(task); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // SubmitTaskResult processes a completed task result from a node.
@@ -198,6 +253,26 @@ func (s *Server) SubmitTaskResult(ctx context.Context, result *coordinatorv1.Tas
 		s.log.Warn("updating reliability after success", zap.Error(err))
 	}
 
+	var nodeLNURI string
+	var rewardSats int64
+	paymentStatus := "queued"
+	if s.disp != nil {
+		err := s.db.QueryRow(ctx,
+			`SELECT node_ln_uri, reward_sats FROM tasks WHERE task_id = $1`,
+			taskID,
+		).Scan(&nodeLNURI, &rewardSats)
+		if err != nil {
+			s.log.Error("task lookup failed for payment enqueue", zap.String("task_id", result.TaskId), zap.Error(err))
+			paymentStatus = "failed"
+		} else if nodeLNURI == "" {
+			s.log.Error("task has no node_ln_uri for payment", zap.String("task_id", result.TaskId))
+			paymentStatus = "failed"
+		} else {
+			s.disp.Enqueue(taskID, nodeLNURI, rewardSats)
+		}
+	}
+
+	metrics.OwmTaskDurationSeconds.Observe(float64(result.ExecMs) / 1000.0)
 	s.log.Info("task result accepted",
 		zap.String("task_id", result.TaskId),
 		zap.String("node_id", result.NodeId),
@@ -205,7 +280,7 @@ func (s *Server) SubmitTaskResult(ctx context.Context, result *coordinatorv1.Tas
 	)
 	return &coordinatorv1.TaskResultAck{
 		Accepted:      true,
-		PaymentStatus: "dispatched",
+		PaymentStatus: paymentStatus,
 	}, nil
 }
 
@@ -296,11 +371,31 @@ func (s *Server) SubmitGradient(ctx context.Context, grad *coordinatorv1.Gradien
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node_id: %v", err)
 	}
 
+	if grad.S3Url == "" {
+		return nil, status.Error(codes.InvalidArgument, "GRADIENT_S3_URL_REQUIRED")
+	}
+	parsed, err := url.Parse(grad.S3Url)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "GRADIENT_S3_URL_INVALID_FORMAT")
+	}
+	key := strings.TrimPrefix(parsed.Path, "/")
+	if key == "" {
+		key = grad.S3Url
+	}
+	if !gradientS3KeyRegex.MatchString(key) {
+		return nil, status.Error(codes.InvalidArgument, "GRADIENT_S3_URL_INVALID_FORMAT")
+	}
+	expectedKey := fmt.Sprintf("gradients/%d/%s.bin", grad.RoundNumber, grad.NodeId)
+	if key != expectedKey {
+		return nil, status.Error(codes.InvalidArgument, "GRADIENT_S3_URL_INVALID_FORMAT")
+	}
+
 	sub := fl.GradientSubmission{
 		NodeID:       nodeID,
 		RoundID:      grad.RoundNumber,
 		GradientData: grad.GradientData,
 		GradientHash: grad.GradientHash,
+		S3URL:        key,
 	}
 
 	if err := s.fl.SubmitGradient(ctx, sub); err != nil {
@@ -322,6 +417,9 @@ func (s *Server) SubmitGradient(ctx context.Context, grad *coordinatorv1.Gradien
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// gradientS3KeyRegex validates S3 key format for gradient blobs (SSRF mitigation).
+var gradientS3KeyRegex = regexp.MustCompile(`^gradients/[0-9]+/[0-9a-f-]{36}\.bin$`)
 
 // validateTimestamp rejects requests with timestamps older than antiReplayWindow
 // or more than 30 seconds in the future (clock skew tolerance).

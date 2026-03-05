@@ -4,14 +4,17 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 
+	"github.com/owmnetwork/owm-coordinator/internal/metrics"
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
 )
 
@@ -66,15 +69,17 @@ type Assignment struct {
 type Scheduler struct {
 	db       *pgxpool.Pool
 	registry *registry.Registry
+	rdb      *redis.Client
 	log      *zap.Logger
 	rng      *rand.Rand
 }
 
 // New creates a Scheduler.
-func New(db *pgxpool.Pool, reg *registry.Registry, log *zap.Logger) *Scheduler {
+func New(db *pgxpool.Pool, reg *registry.Registry, rdb *redis.Client, log *zap.Logger) *Scheduler {
 	return &Scheduler{
 		db:       db,
 		registry: reg,
+		rdb:      rdb,
 		log:      log,
 		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -124,22 +129,32 @@ func (s *Scheduler) Schedule(ctx context.Context, taskType TaskType, inputHash s
 
 // MarkComplete updates a task to completed and triggers payment dispatch.
 func (s *Scheduler) MarkComplete(ctx context.Context, taskID uuid.UUID, outputHash string) error {
+	var taskType string
+	_ = s.db.QueryRow(ctx, `SELECT task_type FROM tasks WHERE task_id = $1`, taskID).Scan(&taskType)
 	_, err := s.db.Exec(ctx,
 		`UPDATE tasks
 		 SET status = 'completed', output_hash = $2, completed_at = now()
 		 WHERE task_id = $1`,
 		taskID, outputHash,
 	)
+	if err == nil && taskType != "" {
+		metrics.OwmTasksTotal.WithLabelValues(taskType, "completed").Inc()
+	}
 	return err
 }
 
 // MarkFailed updates a task to failed and updates the node's reliability score.
 func (s *Scheduler) MarkFailed(ctx context.Context, taskID uuid.UUID, nodeID uuid.UUID) error {
+	var taskType string
+	_ = s.db.QueryRow(ctx, `SELECT task_type FROM tasks WHERE task_id = $1`, taskID).Scan(&taskType)
 	if _, err := s.db.Exec(ctx,
 		`UPDATE tasks SET status = 'failed', completed_at = now() WHERE task_id = $1`,
 		taskID,
 	); err != nil {
 		return err
+	}
+	if taskType != "" {
+		metrics.OwmTasksTotal.WithLabelValues(taskType, "failed").Inc()
 	}
 	return s.registry.UpdateReliability(ctx, nodeID, false)
 }
@@ -214,11 +229,21 @@ func (s *Scheduler) computeReward(ctx context.Context, node *registry.Node, task
 func (s *Scheduler) persistAssignment(ctx context.Context, a *Assignment, inputHash string) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO tasks
-		    (task_id, task_type, assigned_node, status, input_hash,
+		    (task_id, task_type, assigned_node, node_ln_uri, status, input_hash,
 		     reward_sats, submitted_at, started_at, timeout_seconds)
-		 VALUES ($1, $2, $3, 'running', $4, $5, now(), now(), $6)`,
-		a.TaskID, string(a.TaskType), a.NodeID, inputHash,
+		 VALUES ($1, $2, $3, $4, 'running', $5, $6, now(), now(), $7)`,
+		a.TaskID, string(a.TaskType), a.NodeID, a.NodeLNURI, inputHash,
 		a.RewardSats, a.TimeoutSecs,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	metrics.OwmTasksTotal.WithLabelValues(string(a.TaskType), "running").Inc()
+	if s.rdb != nil {
+		jsonBytes, _ := json.Marshal(a)
+		if err := s.rdb.Publish(ctx, "owm:tasks:"+a.NodeID.String(), jsonBytes).Err(); err != nil {
+			s.log.Warn("redis publish task assignment failed", zap.String("node_id", a.NodeID.String()), zap.Error(err))
+		}
+	}
+	return nil
 }

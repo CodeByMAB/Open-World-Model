@@ -5,8 +5,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +21,8 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
@@ -25,12 +30,15 @@ import (
 
 	"github.com/owmnetwork/owm-coordinator/internal/config"
 	"github.com/owmnetwork/owm-coordinator/internal/fl"
+	_ "github.com/owmnetwork/owm-coordinator/internal/metrics"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning/mock"
+	"github.com/owmnetwork/owm-coordinator/internal/payment"
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
 	"github.com/owmnetwork/owm-coordinator/internal/rpc"
 	"github.com/owmnetwork/owm-coordinator/internal/scheduler"
 	"github.com/owmnetwork/owm-coordinator/internal/stake"
+	"github.com/owmnetwork/owm-coordinator/internal/storage"
 	coordinatorv1 "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1"
 )
 
@@ -110,36 +118,120 @@ func run() error {
 	// ── Internal services ─────────────────────────────────────────────────────
 	reg := registry.New(db, log)
 
-	// Stake verifier — Lightning clients: mock in dev mode, real LND/CLN in production (see coord-T2).
-	var lnReadonly, lnSlash lightning.Client
+	// Lightning clients: mock in dev mode, real LND/CLN in production (T2).
+	var lnReadonly, lnPayment, lnSlash lightning.Client
 	if cfg.DevMode {
 		mockClient := mock.New()
 		lnReadonly = mockClient
+		lnPayment = mockClient
 		lnSlash = mockClient
-		log.Info("dev mode: using mock Lightning client for stake verification")
+		log.Warn("dev_mode active — using mock Lightning client, no real payments or slashing")
+	} else {
+		if cfg.Lightning.Backend == "cln" {
+			clnReadonly := lightning.NewCLNClient(cfg.Lightning.CLN.BaseURL, cfg.Lightning.CLN.APIKey)
+			clnPayment := lightning.NewCLNClient(cfg.Lightning.CLN.BaseURL, cfg.Lightning.CLN.APIKey)
+			clnSlash := lightning.NewCLNClient(cfg.Lightning.CLN.BaseURL, cfg.Lightning.CLN.APIKey)
+			lnReadonly = clnReadonly
+			lnPayment = clnPayment
+			lnSlash = clnSlash
+		} else {
+			readonlyMac, err := os.ReadFile(cfg.Lightning.ReadonlyMacaroonPath)
+			if err != nil {
+				return fmt.Errorf("reading readonly macaroon: %w", err)
+			}
+			paymentMac, err := os.ReadFile(cfg.Lightning.PaymentMacaroonPath)
+			if err != nil {
+				return fmt.Errorf("reading payment macaroon: %w", err)
+			}
+			slashingMac, err := os.ReadFile(cfg.Lightning.SlashingMacaroonPath)
+			if err != nil {
+				return fmt.Errorf("reading slashing macaroon: %w", err)
+			}
+			lndReadonly, err := lightning.NewLNDClient(cfg.Lightning.LNDHost, cfg.Lightning.TLSCertPath, readonlyMac)
+			if err != nil {
+				return fmt.Errorf("LND readonly client: %w", err)
+			}
+			lndPayment, err := lightning.NewLNDClient(cfg.Lightning.LNDHost, cfg.Lightning.TLSCertPath, paymentMac)
+			if err != nil {
+				return fmt.Errorf("LND payment client: %w", err)
+			}
+			lndSlash, err := lightning.NewLNDClient(cfg.Lightning.LNDHost, cfg.Lightning.TLSCertPath, slashingMac)
+			if err != nil {
+				return fmt.Errorf("LND slashing client: %w", err)
+			}
+			lnReadonly = lndReadonly
+			lnPayment = lndPayment
+			lnSlash = lndSlash
+		}
 	}
+
 	verif := stake.New(db, lnReadonly, lnSlash, stake.SlashConfig{
 		T1AutoSlashSignals: 3,
 		T2T3MaintainerAcks: 2,
 		CooldownDuration:   30 * 24 * time.Hour,
 	}, log)
 
-	sched := scheduler.New(db, reg, log)
-	flOrch := fl.New(db, reg, log)
+	var rdb *redis.Client
+	if cfg.Redis.Addr != "" {
+		rdb = redis.NewClient(&redis.Options{
+			Addr:     cfg.Redis.Addr,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+			PoolSize: 1020,
+		})
+		if err := rdb.Ping(context.Background()).Err(); err != nil {
+			log.Warn("redis ping failed; task streaming may be disabled", zap.Error(err))
+		}
+	}
+
+	sched := scheduler.New(db, reg, rdb, log)
+	var s3Client *storage.S3Client
+	if cfg.S3.Bucket != "" {
+		var err error
+		s3Client, err = storage.NewS3Client(cfg.S3)
+		if err != nil {
+			return fmt.Errorf("S3 client: %w", err)
+		}
+	}
+	flOrch := fl.NewWithConfig(db, reg, s3Client, &fl.OrchestratorConfig{
+		GradientL2ClipNorm:     cfg.FL.GradientL2ClipNorm,
+		AnomalyStdDevThreshold: cfg.FL.AnomalyStdDevThreshold,
+	}, log)
+	disp := payment.New(lnPayment, db, rdb, log)
 
 	// ── gRPC server ───────────────────────────────────────────────────────────
-	srv := rpc.New(reg, sched, verif, flOrch, db, log)
+	srv := rpc.New(reg, sched, verif, flOrch, disp, rdb, db, log)
 
 	var grpcOpts []grpc.ServerOption
-
-	if cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "" {
+	if cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "" && !cfg.DevMode {
+		caPEM, err := os.ReadFile(cfg.Server.CACertFile)
+		if err != nil {
+			return fmt.Errorf("reading CA cert: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("parsing CA cert failed")
+		}
+		serverCert, err := tls.LoadX509KeyPair(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("loading server TLS: %w", err)
+		}
+		tlsCfg := &tls.Config{
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    caPool,
+			Certificates: []tls.Certificate{serverCert},
+			MinVersion:   tls.VersionTLS13,
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		log.Info("mTLS enabled", zap.String("cert", cfg.Server.TLSCertFile), zap.String("ca", cfg.Server.CACertFile))
+	} else if cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "" && cfg.DevMode {
 		creds, err := credentials.NewServerTLSFromFile(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
 		if err != nil {
 			return fmt.Errorf("loading TLS credentials: %w", err)
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(creds))
-		log.Info("TLS enabled", zap.String("cert", cfg.Server.TLSCertFile))
-	} else {
+		log.Info("TLS enabled (dev mode — client cert not required)", zap.String("cert", cfg.Server.TLSCertFile))
+	} else if cfg.Server.TLSCertFile == "" {
 		log.Warn("TLS not configured — running in plaintext mode (not suitable for production)")
 	}
 
@@ -156,6 +248,20 @@ func run() error {
 		return fmt.Errorf("listening on %s: %w", addr, err)
 	}
 	log.Info("gRPC server listening (clearnet)", zap.String("addr", addr))
+
+	// ── Metrics HTTP server ───────────────────────────────────────────────────
+	httpAddr := cfg.Server.HTTPAddr
+	if httpAddr == "" {
+		httpAddr = ":9001"
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("metrics HTTP server failed", zap.Error(err))
+		}
+	}()
 
 	// ── Tor hidden service listener (optional, SRS-NET-01, SRS-COORD-07) ─────
 	if cfg.Tor.Enabled {
@@ -186,9 +292,10 @@ func run() error {
 		}()
 	}
 
-	// ── Background tickers ────────────────────────────────────────────────────
+	// ── Background tickers and dispatcher ───────────────────────────────────────
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
+	disp.Start(bgCtx)
 
 	go runTicker(bgCtx, log, "requeue-timed-out", 60*time.Second, func(ctx context.Context) {
 		n, err := sched.RequeueTimedOut(ctx)
@@ -233,6 +340,7 @@ func run() error {
 	}
 
 	bgCancel()
+	_ = httpSrv.Shutdown(context.Background())
 	grpcSrv.GracefulStop()
 	log.Info("coordinator stopped cleanly")
 	return nil

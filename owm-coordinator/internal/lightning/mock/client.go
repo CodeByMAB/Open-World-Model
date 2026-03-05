@@ -4,25 +4,51 @@ package mock
 
 import (
 	"context"
+	"errors"
+	"sync"
 
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
 )
 
 // Client is a stub Lightning client that returns synthetic success responses.
 // Use when OWM_DEV_MODE=true or in tests to avoid requiring a real LN node.
-type Client struct{}
+// SetChannels, FailPayments, and FailForceClose allow tests to control behavior.
+type Client struct {
+	mu            sync.RWMutex
+	channels      map[string][]lightning.Channel // key: remotePubkeyHex
+	FailPayments  bool                           // when true, SendPayment returns error
+	FailForceClose bool                          // when true, ForceCloseChan returns error
+}
 
 // New returns a new mock Lightning client.
 func New() *Client {
-	return &Client{}
+	return &Client{
+		channels: make(map[string][]lightning.Channel),
+	}
 }
 
-// ListChannels returns a single synthetic channel meeting tier minimums.
-// RemotePubkeyHex is ignored; the mock always returns a qualifying channel.
+// SetChannels configures the channels returned by ListChannels for the given pubkey.
+// Safe for concurrent use.
+func (c *Client) SetChannels(pubkeyHex string, channels []lightning.Channel) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.channels == nil {
+		c.channels = make(map[string][]lightning.Channel)
+	}
+	c.channels[pubkeyHex] = channels
+}
+
+// ListChannels returns channels configured via SetChannels for remotePubkeyHex,
+// or a single synthetic qualifying channel if none are set.
 func (c *Client) ListChannels(ctx context.Context, remotePubkeyHex string) ([]lightning.Channel, error) {
 	_ = ctx
-	_ = remotePubkeyHex
-	// Synthetic channel that meets minimum for any tier (t3 = 2M sats).
+	c.mu.RLock()
+	chans, ok := c.channels[remotePubkeyHex]
+	c.mu.RUnlock()
+	if ok {
+		return chans, nil
+	}
+	// Default: synthetic channel that meets minimum for any tier (t3 = 2M sats).
 	return []lightning.Channel{{
 		ChannelID:        "mock-dev-channel",
 		RemotePubkey:     remotePubkeyHex,
@@ -32,9 +58,15 @@ func (c *Client) ListChannels(ctx context.Context, remotePubkeyHex string) ([]li
 	}}, nil
 }
 
-// SendPayment simulates a successful payment (no-op).
+// SendPayment simulates a successful payment unless FailPayments is true.
 func (c *Client) SendPayment(ctx context.Context, req lightning.SendPaymentRequest) (*lightning.PaymentResult, error) {
 	_ = ctx
+	c.mu.RLock()
+	fail := c.FailPayments
+	c.mu.RUnlock()
+	if fail {
+		return nil, errors.New("mock: payments disabled for test")
+	}
 	_ = req
 	return &lightning.PaymentResult{
 		PaymentHash:   "mock-payment-hash",
@@ -55,10 +87,16 @@ func (c *Client) AddInvoice(ctx context.Context, amountSats int64, memo string, 
 	}, nil
 }
 
-// ForceCloseChan is a no-op; no real channel is closed.
+// ForceCloseChan is a no-op unless FailForceClose is true.
 func (c *Client) ForceCloseChan(ctx context.Context, channelID string) error {
 	_ = ctx
 	_ = channelID
+	c.mu.RLock()
+	fail := c.FailForceClose
+	c.mu.RUnlock()
+	if fail {
+		return errors.New("mock: force close disabled for test")
+	}
 	return nil
 }
 
