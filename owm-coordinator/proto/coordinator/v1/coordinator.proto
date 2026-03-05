@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package coordinator.v1;
+
+option go_package = "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1;coordinatorv1";
+
+// ─────────────────────────────────────────────
+// CoordinatorService — primary node interface
+// ─────────────────────────────────────────────
+service CoordinatorService {
+  // Node lifecycle
+  rpc RegisterNode    (RegisterNodeRequest)    returns (RegisterNodeResponse);
+  rpc Heartbeat       (HeartbeatRequest)       returns (HeartbeatResponse);
+  rpc DeregisterNode  (DeregisterNodeRequest)  returns (DeregisterNodeResponse);
+
+  // Task streaming — node opens a persistent stream to receive tasks
+  rpc StreamTasks     (HeartbeatRequest)       returns (stream Task);
+  rpc SubmitTaskResult(TaskResult)             returns (TaskResultAck);
+
+  // Model versioning
+  rpc GetCurrentModel (GetModelRequest)        returns (ModelVersion);
+  rpc ListModelVersions(ListModelsRequest)     returns (ListModelsResponse);
+
+  // Node-facing stake info
+  rpc GetStakeStatus  (GetStakeRequest)        returns (StakeStatus);
+
+  // FL participation
+  rpc SubmitGradient  (GradientUpdate)         returns (GradientAck);
+}
+
+// ─────────────────────────────────────────────
+// Registration
+// ─────────────────────────────────────────────
+message RegisterNodeRequest {
+  string           public_key    = 1; // Ed25519 hex
+  string           ln_node_uri   = 2; // pubkey@host:port
+  NodeCapabilities capabilities  = 3;
+  bytes            signature     = 4; // Ed25519 sig over canonical fields
+  int64            timestamp     = 5; // Unix seconds (anti-replay)
+}
+
+message NodeCapabilities {
+  string tier            = 1; // "t1" | "t2" | "t3"
+  float  vram_gb         = 2;
+  float  ram_gb          = 3;
+  float  bandwidth_mbps  = 4;
+  repeated string supported_task_types = 5;
+}
+
+message RegisterNodeResponse {
+  string node_id      = 1;
+  string status       = 2; // "active" | "pending"
+  string message      = 3; // human-readable; includes channel instructions if pending
+  int64  stake_sats   = 4; // current locked sats (0 if pending)
+  float  bonus_mult   = 5; // current stake bonus multiplier
+  string error_code   = 6; // "INSUFFICIENT_STAKE" | "" on success
+}
+
+// ─────────────────────────────────────────────
+// Heartbeat
+// ─────────────────────────────────────────────
+message HeartbeatRequest {
+  string node_id   = 1;
+  bytes  signature = 2; // sig over (node_id + timestamp)
+  int64  timestamp = 3;
+  NodeMetrics metrics = 4;
+}
+
+message NodeMetrics {
+  float  gpu_utilization_pct = 1;
+  float  vram_used_gb        = 2;
+  int32  active_tasks        = 3;
+  float  uptime_hours        = 4;
+}
+
+message HeartbeatResponse {
+  int32  pending_tasks = 1;
+  string coordinator_version = 2;
+  bool   update_available    = 3; // new model checkpoint available
+}
+
+// ─────────────────────────────────────────────
+// Deregistration
+// ─────────────────────────────────────────────
+message DeregisterNodeRequest {
+  string node_id   = 1;
+  bytes  signature = 2;
+  int64  timestamp = 3;
+  string reason    = 4; // "shutdown" | "maintenance" | etc.
+}
+
+message DeregisterNodeResponse {
+  bool   success = 1;
+  string message = 2;
+}
+
+// ─────────────────────────────────────────────
+// Tasks
+// ─────────────────────────────────────────────
+message Task {
+  string task_id          = 1;
+  string task_type        = 2; // "inference" | "fl_round" | "gradient_agg" | "audit_repo" | "embed_data"
+  bytes  encrypted_payload = 3; // NaCl box encrypted to node's pubkey
+  int32  timeout_seconds   = 4;
+  int64  reward_sats       = 5;
+  string model_version     = 6; // required model version
+  bytes  coordinator_sig   = 7; // sig over task_id + payload_hash
+}
+
+message TaskResult {
+  string task_id      = 1;
+  string node_id      = 2;
+  bytes  output_hash  = 3; // SHA-256 of output
+  bytes  output       = 4; // task output (gradient delta, inference result, etc.)
+  int64  exec_ms      = 5;
+  bytes  signature    = 6; // Ed25519 sig over (task_id + output_hash)
+}
+
+message TaskResultAck {
+  bool   accepted      = 1;
+  string rejection_reason = 2; // "" on success
+  string payment_status   = 3; // "dispatched" | "pending" | "failed"
+}
+
+// ─────────────────────────────────────────────
+// Model versioning
+// ─────────────────────────────────────────────
+message GetModelRequest {
+  string sub_model_id = 1; // "" = all sub-models
+}
+
+message ModelVersion {
+  string version_id          = 1;
+  int32  round_number        = 2;
+  int64  created_at          = 3; // Unix seconds
+  map<string, string> sub_model_hashes = 4; // sub_model_id → SHA-256
+  map<string, string> ots_proof_urls   = 5; // sub_model_id → URL
+  int32  btc_block           = 6;           // 0 if OTS pending
+  bool   ots_verified        = 7;
+  string coordinator_sig     = 8;
+}
+
+message ListModelsRequest {
+  int32 limit  = 1;
+  int32 offset = 2;
+}
+
+message ListModelsResponse {
+  repeated ModelVersion versions = 1;
+  int32 total = 2;
+}
+
+// ─────────────────────────────────────────────
+// Stake
+// ─────────────────────────────────────────────
+message GetStakeRequest {
+  string node_id = 1;
+}
+
+message StakeStatus {
+  string channel_id        = 1;
+  int64  capacity_sats     = 2;
+  int64  local_balance     = 3;
+  int64  tier_minimum      = 4;
+  float  bonus_multiplier  = 5;
+  string status            = 6; // "active" | "degraded" | "force_closed"
+  int64  last_verified_at  = 7; // Unix seconds
+}
+
+// ─────────────────────────────────────────────
+// Federated learning
+// ─────────────────────────────────────────────
+message GradientUpdate {
+  string node_id       = 1;
+  int32  round_number  = 2;
+  bytes  gradient_data = 3; // compressed sparse gradient delta
+  string gradient_hash = 4; // SHA-256 of gradient_data
+  bytes  signature     = 5; // Ed25519 sig over (round_number + gradient_hash)
+}
+
+message GradientAck {
+  bool   accepted        = 1;
+  string rejection_reason = 2;
+  int64  reward_sats     = 3; // 0 until round completes
+}
