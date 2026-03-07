@@ -21,6 +21,7 @@ type Config struct {
 	FL        FLConfig
 	Stake     StakeConfig
 	Tor       TorConfig
+	Observer  ObserverConfig
 	Log       LogConfig
 }
 
@@ -109,6 +110,16 @@ type TorConfig struct {
 	HiddenServiceDir string
 }
 
+// ObserverConfig controls the Observer Protocol v0.1 receipt submission.
+// When Enabled is true, the coordinator signs and submits payment receipts
+// to the Observer Registry (api.observerprotocol.org) after each successful
+// Lightning payment. SigningKeyPath must point to an Ed25519 private key.
+type ObserverConfig struct {
+	Enabled        bool   // submit receipts to Observer Registry
+	APIEndpoint    string // e.g. "https://api.observerprotocol.org"
+	SigningKeyPath string // path to Ed25519 private key (PEM or raw hex)
+}
+
 type LogConfig struct {
 	Level  string // "debug" | "info" | "warn" | "error"
 	Format string // "json" | "console"
@@ -144,6 +155,8 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("tor.local_bind_addr", "127.0.0.1:9002")
 	v.SetDefault("tor.socks5_addr", "127.0.0.1:9050")
 	v.SetDefault("tor.hidden_service_dir", "/var/lib/tor/owm-coordinator")
+	v.SetDefault("observer.enabled", false)
+	v.SetDefault("observer.api_endpoint", "https://api.observerprotocol.org")
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "json")
 	v.SetDefault("dev_mode", false)
@@ -212,6 +225,13 @@ func (c *Config) validate() error {
 	// mTLS: when TLS is used in production, CA cert is required for client verification.
 	if c.Server.TLSCertFile != "" && !c.DevMode && c.Server.CACertFile == "" {
 		return fmt.Errorf("server.ca_cert_file is required when TLS is enabled in production (for mTLS node authentication)")
+	}
+	// Observer: when enabled, signing key is required for receipt signatures.
+	if c.Observer.Enabled && c.Observer.SigningKeyPath == "" {
+		return fmt.Errorf("observer.signing_key_path is required when observer.enabled is true")
+	}
+	if c.Observer.Enabled && strings.TrimSpace(c.Observer.APIEndpoint) == "" {
+		return fmt.Errorf("observer.api_endpoint is required when observer.enabled is true")
 	}
 	return nil
 }

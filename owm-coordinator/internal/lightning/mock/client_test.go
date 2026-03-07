@@ -2,11 +2,16 @@ package mock
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
+	"github.com/owmnetwork/owm-coordinator/internal/observer"
+	"go.uber.org/zap"
 )
 
 func TestMockClient_SetChannels_ListChannels(t *testing.T) {
@@ -62,6 +67,51 @@ func TestMockClient_FailForceClose(t *testing.T) {
 	err = c.ForceCloseChan(ctx, "ch1")
 	if err != nil {
 		t.Errorf("expected nil: %v", err)
+	}
+}
+
+// TestMockClient_GetInfo_DevModeObserverPath verifies that mock GetInfo returns
+// a valid hex pubkey so observer.PubkeyHashHex is non-empty and Client.Submit
+// proceeds past sender-hash validation (dev-mode observer path).
+func TestMockClient_GetInfo_DevModeObserverPath(t *testing.T) {
+	ctx := context.Background()
+	mockLN := New()
+	info, err := mockLN.GetInfo(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := observer.PubkeyHashHex(info.PubkeyHex)
+	if hash == "" {
+		t.Fatal("PubkeyHashHex(mock GetInfo.PubkeyHex) must be non-empty for dev-mode observer")
+	}
+	svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"receipt_id":"dev-obs-123"}`))
+	}))
+	defer svr.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	obsClient, err := observer.NewClient(observer.ClientConfig{
+		APIEndpoint:        svr.URL,
+		SigningKeyPEMOrHex: priv,
+		Log:                zap.NewNop(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obsClient.SetSenderPubkeyHash(hash)
+	receipt := observer.Receipt{
+		PaymentRail:           observer.PaymentRailLightning,
+		SettlementReference:   "mock-preimage",
+		ReceiverPublicKeyHash: observer.PubkeyHashHex("02abcdef"),
+		AmountBucket:          "1-100",
+	}
+	receiptID, err := obsClient.Submit(ctx, receipt)
+	if err != nil {
+		t.Fatalf("Submit must proceed past sender-hash validation in dev mode: %v", err)
+	}
+	if receiptID != "dev-obs-123" {
+		t.Errorf("got receipt_id %q, want dev-obs-123", receiptID)
 	}
 }
 

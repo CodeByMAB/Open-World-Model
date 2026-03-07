@@ -33,6 +33,7 @@ import (
 	_ "github.com/owmnetwork/owm-coordinator/internal/metrics"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning/mock"
+	"github.com/owmnetwork/owm-coordinator/internal/observer"
 	"github.com/owmnetwork/owm-coordinator/internal/payment"
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
 	"github.com/owmnetwork/owm-coordinator/internal/rpc"
@@ -197,7 +198,33 @@ func run() error {
 		GradientL2ClipNorm:     cfg.FL.GradientL2ClipNorm,
 		AnomalyStdDevThreshold: cfg.FL.AnomalyStdDevThreshold,
 	}, log)
-	disp := payment.New(lnPayment, db, rdb, log)
+
+	var obsClient *observer.Client
+	if cfg.Observer.Enabled {
+		keyData, err := os.ReadFile(cfg.Observer.SigningKeyPath)
+		if err != nil {
+			return fmt.Errorf("observer signing key: %w", err)
+		}
+		obsClient, err = observer.NewClient(observer.ClientConfig{
+			APIEndpoint:       cfg.Observer.APIEndpoint,
+			SigningKeyPEMOrHex: keyData,
+			Log:               log,
+		})
+		if err != nil {
+			return fmt.Errorf("observer client: %w", err)
+		}
+		info, err := lnReadonly.GetInfo(context.Background())
+		if err != nil {
+			return fmt.Errorf("observer: get treasury pubkey (GetInfo): %w", err)
+		}
+		senderPubkeyHash := observer.PubkeyHashHex(info.PubkeyHex)
+		if senderPubkeyHash == "" {
+			return fmt.Errorf("observer: treasury pubkey from GetInfo produced empty hash (pubkey_hex length=%d); cannot set sender_public_key_hash for receipt submission", len(info.PubkeyHex))
+		}
+		obsClient.SetSenderPubkeyHash(senderPubkeyHash)
+		log.Info("observer protocol enabled", zap.String("api", cfg.Observer.APIEndpoint))
+	}
+	disp := payment.New(lnPayment, db, rdb, log, obsClient)
 
 	// ── gRPC server ───────────────────────────────────────────────────────────
 	srv := rpc.New(reg, sched, verif, flOrch, disp, rdb, db, log)

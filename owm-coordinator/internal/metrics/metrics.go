@@ -44,6 +44,12 @@ var (
 		prometheus.CounterOpts{Name: "owm_slash_events_total", Help: "Slash events by tier"},
 		[]string{"tier"},
 	)
+	// OwmObserverReceiptsTotal counts Observer Protocol receipt submissions by status.
+	// status: success, failure, skipped (already had receipt_id), not_persisted (submitted but DB update affected 0 rows).
+	OwmObserverReceiptsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "owm_observer_receipts_total", Help: "Observer Protocol receipt submissions by status"},
+		[]string{"status"},
+	)
 )
 
 func init() {
@@ -56,5 +62,6 @@ func init() {
 		OwmPaymentSatsTotal,
 		OwmStakeVerificationsTotal,
 		OwmSlashEventsTotal,
+		OwmObserverReceiptsTotal,
 	)
 }

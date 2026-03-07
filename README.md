@@ -1,10 +1,10 @@
 # Open World Model (OWM)
 
-> *"A living, open model of our world — built by everyone, owned by no one, powered by Bitcoin."*
+> *"A distributed AI built by everyone, owned by no one, powered by Bitcoin."*
 
 ## What is OWM?
 
-The **Open World Model** is an open-source, federated ensemble of AI models that build and maintain a comprehensive, continuously updated model of the real world — geography, science, code, language, and live data. The system runs on a permissionless network of GPU nodes. Node operators are compensated in **Bitcoin** via the **Lightning Network**. Model versions are anchored to the Bitcoin blockchain via **OpenTimestamps**. The project integrates with **GitHub** for automated code analysis, security audits, and PR generation. Participation is secured by Bitcoin-native **Proof-of-Work** (optional mining pool contribution) and **Proof-of-Stake** (Lightning channel stake to the treasury); there is no new token.
+The **Open World Model** is not a model of the world — it is a **distributed AI** formed from many different AI models working together as a single conglomerate. It is an open-source, federated ensemble of models that collectively run on a permissionless network, continuously updated with diverse capabilities (e.g. geography, science, code, language, live data). The system runs on a permissionless network of GPU nodes. Node operators are compensated in **Bitcoin** via the **Lightning Network**. Model versions are anchored to the Bitcoin blockchain via **OpenTimestamps**. The project integrates with **GitHub** for automated code analysis, security audits, and PR generation. Participation is secured by Bitcoin-native **Proof-of-Work** (optional mining pool contribution) and **Proof-of-Stake** (Lightning channel stake to the treasury); there is no new token.
 
 For full business and technical requirements, see [BRS.md](BRS.md) and [SRS.md](SRS.md).
 

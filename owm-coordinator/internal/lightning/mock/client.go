@@ -100,11 +100,13 @@ func (c *Client) ForceCloseChan(ctx context.Context, channelID string) error {
 	return nil
 }
 
-// GetInfo returns synthetic node info.
+// GetInfo returns synthetic node info. PubkeyHex is a valid 66-char hex
+// (33-byte secp256k1 pubkey) so observer.PubkeyHashHex yields a non-empty
+// sender_public_key_hash in dev mode.
 func (c *Client) GetInfo(ctx context.Context) (*lightning.NodeInfo, error) {
 	_ = ctx
 	return &lightning.NodeInfo{
-		PubkeyHex:   "mock-pubkey-hex",
+		PubkeyHex:   "02b7b2e205e27f236b1d2b2e2b2e2b2e2b2e2b2e2b2e2b2e2b2e2b2e2b2e2b2e2b2e",
 		Alias:       "owm-mock-dev",
 		BlockHeight: 0,
 	}, nil

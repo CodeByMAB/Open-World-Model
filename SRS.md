@@ -84,7 +84,7 @@ This document covers all software components of the OWM system: the node daemon,
 
 ### 2.1 Product Perspective
 
-OWM is a standalone distributed system composed of:
+OWM is a **distributed AI**: many different AI models form one conglomerate system (it is not a single "model of the world"). It is a standalone distributed system composed of:
 - A **P2P node network** where each node runs the OWM daemon.
 - A **coordinator layer** that bootstraps the network and routes tasks (decentralizes progressively).
 - A **model layer** consisting of a federated ensemble of transformer-based sub-models.
@@ -98,7 +98,7 @@ OWM is a standalone distributed system composed of:
 |---|---|---|
 | Node Operator | CLI + Dashboard | Run node daemon, earn BTC |
 | Data Contributor | CLI + API | Submit datasets, earn BTC |
-| API Consumer | REST/WebSocket API | Query world model |
+| API Consumer | REST/WebSocket API | Query the conglomerate model (OWM) |
 | GitHub User | GitHub App + Bounty Board | Contribute code, earn BTC |
 | Core Maintainer | All interfaces + admin CLI | Deploy, configure, govern |
 | Treasury Signer | Multisig wallet UI | Approve treasury transactions |
@@ -539,7 +539,7 @@ jobs:
 
 ```
 # Query API
-POST   /v1/query                    # Send a query to the world model
+POST   /v1/query                    # Send a query to the conglomerate model (OWM)
 POST   /v1/query/stream             # Streaming token generation (WebSocket)
 GET    /v1/query/{query_id}         # Retrieve cached query result
 

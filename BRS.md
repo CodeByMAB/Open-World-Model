@@ -35,7 +35,7 @@
 
 ## 1. Executive Summary
 
-The **Open World Model (OWM)** is an open-source, federated ensemble of AI models that collectively builds, maintains, and continuously updates a comprehensive model of the real world — encompassing geography, science, code, language, and live data streams. The system runs on a permissionless, decentralized network of GPU-equipped nodes. Node operators are compensated in Bitcoin via the Lightning Network for their compute and data contributions. Model versioning and integrity are anchored to the Bitcoin blockchain via **OpenTimestamps**. The project is well-versed in software engineering and Git, enabling it to autonomously analyze, improve, and generate pull requests for GitHub repositories. The treasury is controlled by a Bitcoin multisig wallet; technical governance follows a rough-consensus model.
+The **Open World Model (OWM)** is not a model of the world — it is a **distributed AI** formed from many different AI models that work together as a single conglomerate. It is an open-source, federated ensemble that collectively builds, maintains, and continuously updates this conglomerate, with diverse capabilities encompassing geography, science, code, language, and live data streams. The system runs on a permissionless, decentralized network of GPU-equipped nodes. Node operators are compensated in Bitcoin via the Lightning Network for their compute and data contributions. Model versioning and integrity are anchored to the Bitcoin blockchain via **OpenTimestamps**. The project is well-versed in software engineering and Git, enabling it to autonomously analyze, improve, and generate pull requests for GitHub repositories. The treasury is controlled by a Bitcoin multisig wallet; technical governance follows a rough-consensus model.
 
 Node participation is secured by two complementary Bitcoin-native mechanisms: **Proof-of-Work (PoW)** — nodes may optionally contribute hashrate to the OWM-operated Stratum v2 Bitcoin mining pool, with mining revenue split between the miner and the treasury; and **Proof-of-Stake (PoS)** — all joining nodes must open a Lightning payment channel to the treasury of a minimum size determined by their hardware tier, locking in a financial commitment that can be force-closed upon verified misbehavior.
 
@@ -43,9 +43,9 @@ Node participation is secured by two complementary Bitcoin-native mechanisms: **
 
 ## 2. Business Context & Problem Statement
 
-### 2.1 Current State of World Models
+### 2.1 Current State of Large-Scale AI
 
-Existing large-scale AI world models (e.g., large language models, knowledge graphs) are:
+Existing large-scale AI systems (e.g., large language models, knowledge graphs) are:
 
 - **Centralized**: Controlled by a small number of corporations with opaque governance.
 - **Expensive to run**: Requiring massive proprietary data centers inaccessible to independent contributors.
@@ -59,7 +59,7 @@ Bitcoin's Lightning Network enables programmable, near-zero-fee micropayments gl
 
 ### 2.3 Problem Statement
 
-There is no open, continuously updated, decentralized AI world model that:
+There is no open, continuously updated, decentralized distributed AI (conglomerate of many models) that:
 1. Compensates contributors fairly and automatically with real money (Bitcoin).
 2. Allows anyone with a GPU to join and earn rewards.
 3. Is demonstrably trustworthy via cryptographic model provenance (OpenTimestamps).
@@ -70,9 +70,9 @@ There is no open, continuously updated, decentralized AI world model that:
 
 ## 3. Project Vision
 
-> **"A living, open model of our world — built by everyone, owned by no one, powered by Bitcoin."**
+> **"A distributed AI built by everyone, owned by no one, powered by Bitcoin."**
 
-The Open World Model will be the world's first community-owned, continuously updated AI that understands the planet — its geography, science, culture, code, and events — funded and incentivized entirely through the Bitcoin economy.
+The Open World Model is a conglomerate AI: many different AI models combined into one distributed system. It will be the world's first community-owned, continuously updated distributed AI of this kind — capable across geography, science, culture, code, and events — funded and incentivized entirely through the Bitcoin economy.
 
 ---
 
@@ -387,7 +387,7 @@ The Lightning channel stake acts as OWM's native Proof-of-Stake mechanism — en
 
 | Term | Definition |
 |---|---|
-| **OWM** | Open World Model — the project name |
+| **OWM** | Open World Model — distributed/conglomerate AI project (many models, one system) |
 | **Node** | A machine operated by a contributor that provides GPU compute to the OWM network |
 | **Federated Ensemble** | A collection of specialized AI sub-models that collaborate to produce outputs, where each sub-model may be trained on different nodes |
 | **Federated Learning** | A machine learning approach where model training occurs locally on nodes; only gradient updates (not raw data) are shared |
