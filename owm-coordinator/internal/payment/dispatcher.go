@@ -33,6 +33,8 @@ type Dispatcher struct {
 	db       *pgxpool.Pool
 	rdb      *redis.Client
 	observer *observer.Client
+	// SubmitFn overrides observer.Client.Submit for testing. If nil, d.observer.Submit is used.
+	SubmitFn func(ctx context.Context, r observer.Receipt) (string, error)
 	queue    chan paymentJob
 	log      *zap.Logger
 }
@@ -138,7 +140,7 @@ func (d *Dispatcher) process(ctx context.Context, job paymentJob) {
 			metrics.OwmPaymentsTotal.WithLabelValues("paid").Inc()
 			metrics.OwmPaymentSatsTotal.Add(float64(job.AmountSats))
 			// Observer Protocol: submit receipt asynchronously; do not block or retry on failure.
-			if d.observer != nil {
+			if d.observer != nil || d.SubmitFn != nil {
 				go d.submitObserverReceipt(context.Background(), job.TaskID, job.NodeLNURI, job.AmountSats, preimage)
 			}
 			return
@@ -167,12 +169,14 @@ func (d *Dispatcher) process(ctx context.Context, job paymentJob) {
 // single structured field (receipt_payload) for manual resubmission and audit.
 // Failures are reflected in metrics only; payment status is unchanged.
 func (d *Dispatcher) submitObserverReceipt(ctx context.Context, taskID uuid.UUID, nodeLNURI string, amountSats int64, preimage string) {
-	var existingID string
-	err := d.db.QueryRow(ctx, `SELECT observer_receipt_id FROM tasks WHERE task_id = $1`, taskID).Scan(&existingID)
-	if err == nil && existingID != "" {
-		metrics.OwmObserverReceiptsTotal.WithLabelValues("skipped").Inc()
-		d.log.Debug("observer receipt already present, skipping", zap.String("task_id", taskID.String()), zap.String("observer_receipt_id", existingID))
-		return
+	if d.db != nil {
+		var existingID string
+		err := d.db.QueryRow(ctx, `SELECT observer_receipt_id FROM tasks WHERE task_id = $1`, taskID).Scan(&existingID)
+		if err == nil && existingID != "" {
+			metrics.OwmObserverReceiptsTotal.WithLabelValues("skipped").Inc()
+			d.log.Debug("observer receipt already present, skipping", zap.String("task_id", taskID.String()), zap.String("observer_receipt_id", existingID))
+			return
+		}
 	}
 
 	receipt := observer.Receipt{
@@ -181,7 +185,14 @@ func (d *Dispatcher) submitObserverReceipt(ctx context.Context, taskID uuid.UUID
 		ReceiverPublicKeyHash: observer.PubkeyHashHex(parsePubkeyFromLNURI(nodeLNURI)),
 		AmountBucket:          observer.AmountBucket(amountSats),
 	}
-	receiptID, err := d.observer.Submit(ctx, receipt)
+	submitFn := d.SubmitFn
+	if submitFn == nil {
+		if d.observer == nil {
+			return
+		}
+		submitFn = d.observer.Submit
+	}
+	receiptID, err := submitFn(ctx, receipt)
 	if err != nil {
 		metrics.OwmObserverReceiptsTotal.WithLabelValues("failure").Inc()
 		receiptPayload, _ := json.Marshal(receipt)
@@ -196,27 +207,29 @@ func (d *Dispatcher) submitObserverReceipt(ctx context.Context, taskID uuid.UUID
 		metrics.OwmObserverReceiptsTotal.WithLabelValues("failure").Inc()
 		return
 	}
-	tag, err := d.db.Exec(ctx,
-		`UPDATE tasks SET observer_receipt_id = $2 WHERE task_id = $1`,
-		taskID, receiptID,
-	)
-	if err != nil {
-		metrics.OwmObserverReceiptsTotal.WithLabelValues("failure").Inc()
-		d.log.Warn("failed to store observer_receipt_id",
-			zap.String("task_id", taskID.String()),
-			zap.String("receipt_id", receiptID),
-			zap.Error(err),
+	if d.db != nil {
+		tag, err := d.db.Exec(ctx,
+			`UPDATE tasks SET observer_receipt_id = $2 WHERE task_id = $1`,
+			taskID, receiptID,
 		)
-		return
-	}
-	if tag.RowsAffected() != 1 {
-		metrics.OwmObserverReceiptsTotal.WithLabelValues("not_persisted").Inc()
-		d.log.Warn("observer receipt submitted but task row not updated; receipt_id lost",
-			zap.String("task_id", taskID.String()),
-			zap.String("receipt_id", receiptID),
-			zap.Int64("rows_affected", tag.RowsAffected()),
-		)
-		return
+		if err != nil {
+			metrics.OwmObserverReceiptsTotal.WithLabelValues("failure").Inc()
+			d.log.Warn("failed to store observer_receipt_id",
+				zap.String("task_id", taskID.String()),
+				zap.String("receipt_id", receiptID),
+				zap.Error(err),
+			)
+			return
+		}
+		if tag.RowsAffected() != 1 {
+			metrics.OwmObserverReceiptsTotal.WithLabelValues("not_persisted").Inc()
+			d.log.Warn("observer receipt submitted but task row not updated; receipt_id lost",
+				zap.String("task_id", taskID.String()),
+				zap.String("receipt_id", receiptID),
+				zap.Int64("rows_affected", tag.RowsAffected()),
+			)
+			return
+		}
 	}
 	metrics.OwmObserverReceiptsTotal.WithLabelValues("success").Inc()
 }

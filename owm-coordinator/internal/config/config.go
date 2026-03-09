@@ -222,9 +222,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("lightning.backend must be 'lnd' or 'cln', got %q", c.Lightning.Backend)
 		}
 	}
-	// mTLS: when TLS is used in production, CA cert is required for client verification.
+	// mTLS: when TLS is used and dev_mode is false, CA cert is required for client verification.
 	if c.Server.TLSCertFile != "" && !c.DevMode && c.Server.CACertFile == "" {
-		return fmt.Errorf("server.ca_cert_file is required when TLS is enabled in production (for mTLS node authentication)")
+		return fmt.Errorf("server.ca_cert_file is required when TLS is enabled and dev_mode is false (mTLS enforcement)")
 	}
 	// Observer: when enabled, signing key is required for receipt signatures.
 	if c.Observer.Enabled && c.Observer.SigningKeyPath == "" {
