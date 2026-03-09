@@ -11,11 +11,14 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	coordinatorv1 "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1"
 )
@@ -134,5 +137,29 @@ func TestGRPCServer_RejectsClientWithoutCert(t *testing.T) {
 	if rpcErr == nil {
 		t.Fatal("expected RPC to fail because client presented no certificate, but it succeeded")
 	}
+
+	st, ok := status.FromError(rpcErr)
+	if !ok {
+		t.Fatalf("expected a gRPC status error, got: %v", rpcErr)
+	}
+
+	// codes.Unimplemented means the server accepted the client and dispatched
+	// the call — mTLS was not enforced.
+	if st.Code() == codes.Unimplemented {
+		t.Fatalf("got Unimplemented — mTLS was not enforced; server accepted the unauthenticated client: %v", rpcErr)
+	}
+
+	// The server must close the connection at the TLS layer, which surfaces as
+	// codes.Unavailable on the client side.
+	if st.Code() != codes.Unavailable {
+		t.Fatalf("expected Unavailable (TLS handshake rejection), got %v: %v", st.Code(), rpcErr)
+	}
+
+	// The error message should reference the TLS/handshake/certificate failure.
+	errMsg := strings.ToLower(rpcErr.Error())
+	if !strings.Contains(errMsg, "handshake") && !strings.Contains(errMsg, "certificate") && !strings.Contains(errMsg, "tls") {
+		t.Fatalf("expected error to mention TLS/handshake/certificate, got: %v", rpcErr)
+	}
+
 	t.Logf("got expected error (mTLS rejection): %v", rpcErr)
 }
