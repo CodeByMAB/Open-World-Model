@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -104,7 +106,12 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 		RegisteredAt:  time.Now().UTC(),
 	}
 
+	// Capture existing tier/status before the upsert so re-registration can
+	// decrement the prior label and keep metrics symmetric.
 	const q = `
+		WITH prior AS (
+			SELECT tier, status FROM nodes WHERE public_key = $2
+		)
 		INSERT INTO nodes (node_id, public_key, ln_node_uri, onion_address, tier,
 		                   vram_gb, ram_gb, bandwidth_mbps, reliability, status, registered_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -117,17 +124,30 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 			    bandwidth_mbps = EXCLUDED.bandwidth_mbps,
 			    status         = 'pending',
 			    registered_at  = EXCLUDED.registered_at
-		RETURNING node_id, status`
+		RETURNING node_id, status,
+		          (SELECT tier   FROM prior) AS prior_tier,
+		          (SELECT status FROM prior) AS prior_status`
 
 	row := r.db.QueryRow(ctx, q,
 		node.NodeID, node.PublicKey, node.LNNodeURI, node.OnionAddress, node.Tier,
 		node.VRAMGB, node.RAMGB, node.BandwidthMbps, node.Reliability,
 		node.Status, node.RegisteredAt,
 	)
-	if err := row.Scan(&node.NodeID, &node.Status); err != nil {
+
+	var priorTier, priorStatus *string
+	if err := row.Scan(&node.NodeID, &node.Status, &priorTier, &priorStatus); err != nil {
 		return nil, fmt.Errorf("upserting node: %w", err)
 	}
 
+	// On re-registration the node had a prior status that must be decremented
+	// before the new pending count is incremented.
+	if priorStatus != nil {
+		pt := node.Tier
+		if priorTier != nil {
+			pt = *priorTier
+		}
+		metrics.OwmNodesTotal.WithLabelValues(pt, *priorStatus).Dec()
+	}
 	metrics.OwmNodesTotal.WithLabelValues(node.Tier, node.Status).Inc()
 	r.log.Info("node registered", zap.String("node_id", node.NodeID.String()), zap.String("tier", node.Tier))
 	return node, nil
@@ -135,11 +155,21 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 
 // Activate transitions a pending node to active after stake verification passes.
 func (r *Registry) Activate(ctx context.Context, nodeID uuid.UUID) error {
-	_, err := r.db.Exec(ctx,
-		`UPDATE nodes SET status = $1 WHERE node_id = $2 AND status = $3`,
+	var tier string
+	err := r.db.QueryRow(ctx,
+		`UPDATE nodes SET status = $1 WHERE node_id = $2 AND status = $3 RETURNING tier`,
 		StatusActive, nodeID, StatusPending,
-	)
-	return err
+	).Scan(&tier)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Node was not in pending state; nothing to do.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	metrics.OwmNodesTotal.WithLabelValues(tier, StatusPending).Dec()
+	metrics.OwmNodesTotal.WithLabelValues(tier, StatusActive).Inc()
+	return nil
 }
 
 // RecordHeartbeat updates last_heartbeat and node metrics, returning the
