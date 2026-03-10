@@ -11,6 +11,16 @@ import (
 )
 
 func TestMetrics_AllEightPresent(t *testing.T) {
+	// Vec metrics only appear in /metrics output once at least one label
+	// combination has been observed. Initialize a sentinel value for each so
+	// the Gather call below emits all eight metric families.
+	OwmNodesTotal.WithLabelValues("_test", "_test")
+	OwmTasksTotal.WithLabelValues("_test", "_test")
+	OwmFLRoundsTotal.WithLabelValues("_test")
+	OwmPaymentsTotal.WithLabelValues("_test")
+	OwmStakeVerificationsTotal.WithLabelValues("_test")
+	OwmSlashEventsTotal.WithLabelValues("_test")
+
 	ts := httptest.NewServer(promhttp.Handler())
 	defer ts.Close()
 

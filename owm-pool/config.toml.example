@@ -1,0 +1,27 @@
+[pool]
+listen_addr = "0.0.0.0:3333"
+bitcoin_rpc_url = "http://127.0.0.1:8332"
+bitcoin_rpc_user = "rpcuser"
+bitcoin_rpc_pass = "rpcpass"
+bitcoin_zmq_addr = "tcp://127.0.0.1:28332"
+coordinator_internal_url = "http://127.0.0.1:8080"
+min_payout_sats = 10000
+payout_interval_seconds = 3600
+
+[payout]
+min_payout_sats = 10000
+payout_interval_seconds = 3600
+treasury_ln_uri = "lnbc..."
+
+[lightning]
+lnd_host = "127.0.0.1:10009"
+payment_macaroon_path = "/path/to/invoice.macaroon"
+lnd_tls_cert_path = "/path/to/tls.cert"
+
+[database]
+dsn = "postgres://owm:owm@localhost:5432/owm_pool"
+
+[observer]
+enabled = true
+api_endpoint = "https://observer.owm.network/v1/receipts"
+signing_key_path = "/path/to/signing.key"

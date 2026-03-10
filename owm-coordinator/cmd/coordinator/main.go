@@ -30,6 +30,7 @@ import (
 
 	"github.com/owmnetwork/owm-coordinator/internal/config"
 	"github.com/owmnetwork/owm-coordinator/internal/fl"
+	poolhttp "github.com/owmnetwork/owm-coordinator/internal/http"
 	_ "github.com/owmnetwork/owm-coordinator/internal/metrics"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning"
 	"github.com/owmnetwork/owm-coordinator/internal/lightning/mock"
@@ -283,6 +284,7 @@ func run() error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("GET /internal/pool/nodes/{pubkey}/status", poolhttp.HandleGetNodeStatus(db, log))
 	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
