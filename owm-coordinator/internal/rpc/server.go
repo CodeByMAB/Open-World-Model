@@ -4,8 +4,9 @@ package rpc
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -238,6 +239,29 @@ func (s *Server) SubmitTaskResult(ctx context.Context, result *coordinatorv1.Tas
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node_id: %v", err)
 	}
 
+	// Require a non-empty signature before touching any state (SRS-SEC-01, SRS-SEC-03).
+	if len(result.Signature) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "SIGNATURE_REQUIRED")
+	}
+
+	// Resolve the node's Ed25519 public key to verify the signature.
+	var pubKeyHex string
+	if err := s.db.QueryRow(ctx,
+		`SELECT public_key FROM nodes WHERE node_id = $1`, nodeID,
+	).Scan(&pubKeyHex); err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "node not found")
+	}
+
+	if err := verifyTaskResultSig(pubKeyHex, result.TaskId, result.OutputHash, result.Signature); err != nil {
+		s.log.Warn("task result signature verification failed",
+			zap.String("task_id", result.TaskId),
+			zap.String("node_id", result.NodeId),
+			zap.Error(err),
+		)
+		_ = s.registry.UpdateReliability(ctx, nodeID, false)
+		return nil, status.Error(codes.PermissionDenied, "INVALID_SIGNATURE")
+	}
+
 	outputHash := hex.EncodeToString(result.OutputHash)
 	if err := s.scheduler.MarkComplete(ctx, taskID, outputHash); err != nil {
 		s.log.Error("marking task complete", zap.String("task_id", result.TaskId), zap.Error(err))
@@ -433,6 +457,30 @@ func validateTimestamp(ts int64) error {
 		return fmt.Errorf("timestamp too far in the future")
 	}
 	return nil
+}
+
+// verifyTaskResultSig checks the Ed25519 signature on a task result.
+// The signed message is: owm-task-result|<task_id>|<output_hash_hex>
+// This matches what nodes must sign per the SRS-SEC-03 node identity key contract.
+func verifyTaskResultSig(pubKeyHex, taskID string, outputHash, sig []byte) error {
+	if len(sig) == 0 {
+		return fmt.Errorf("signature is required")
+	}
+	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid node public key")
+	}
+	msg := canonicalTaskResultMessage(taskID, hex.EncodeToString(outputHash))
+	if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), msg, sig) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
+// canonicalTaskResultMessage constructs the deterministic byte string that a node
+// must sign when submitting a task result.
+func canonicalTaskResultMessage(taskID, outputHashHex string) []byte {
+	return []byte(fmt.Sprintf("owm-task-result|%s|%s", taskID, outputHashHex))
 }
 
 // stakeMinSats returns the minimum stake in satoshis for a given tier string.
