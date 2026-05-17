@@ -108,6 +108,20 @@ jobs:
           working-directory: owm-coordinator
           args: --timeout=5m
 
+  # ── Kubernetes manifests (Kustomize) ─────────────────────────────────────────
+  kustomize:
+    name: kustomize build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build overlays
+        run: |
+          kubectl kustomize k8s/overlays/dev >/tmp/dev.yaml
+          kubectl kustomize k8s/overlays/prod >/tmp/prod.yaml
+          kubectl kustomize k8s/overlays/prod-mtls >/tmp/prod-mtls.yaml
+          test -s /tmp/dev.yaml && test -s /tmp/prod.yaml && test -s /tmp/prod-mtls.yaml
+
   # ── Docker build check ───────────────────────────────────────────────────────
   docker:
     name: Docker build

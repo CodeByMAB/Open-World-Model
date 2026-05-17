@@ -32,6 +32,7 @@ Open-World-Model/
 │   ├── proto/coordinator/v1/
 │   ├── Dockerfile
 │   └── go.mod
+├── k8s/                # Kustomize: Postgres + coordinator (dev / prod overlays)
 ├── docs/
 │   ├── architecture.md
 │   └── adr/            # ADR-001 through ADR-005
@@ -49,7 +50,11 @@ A full target layout (including node, pool, governance, and deploy) is described
 - **Tests:** `go test -v ./...` (set `OWM_TEST_DSN` for integration tests, e.g. `postgres://owm:owm@localhost:5432/owm_test`).
 - **Proto:** Generate stubs with `protoc` as in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-Configuration is file-based (see `internal/config`); a config file path can be set via `OWM_CONFIG_FILE` or the first CLI argument.
+Configuration is file-based (see `internal/config`); a config file path can be set via `OWM_CONFIG_FILE` or the first CLI argument. Environment variables `OWM_*` are also supported for container and Kubernetes deployments.
+
+### Kubernetes
+
+See [k8s/README.md](k8s/README.md). **Each coordinator operator runs their own cluster** (for example `k3s` or a managed control plane on a VPS); decentralization is many such stacks, not one shared Kubernetes control plane across the network.
 
 ## Documentation
 

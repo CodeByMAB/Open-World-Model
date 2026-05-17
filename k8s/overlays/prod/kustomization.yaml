@@ -1,0 +1,7 @@
+# Production-shaped coordinator (real Lightning). Apply secrets BEFORE deploy (see k8s/README.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: coordinator-prod-env.yaml

@@ -1,0 +1,22 @@
+# Local / first VPS: in-cluster Postgres, coordinator in dev_mode (mock Lightning).
+# Build and load the image on your nodes, or set `images` to your registry.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+secretGenerator:
+  - name: owm-postgres
+    literals:
+      - password=owm-dev-not-for-production
+    options:
+      disableNameSuffixHash: true
+  - name: owm-coordinator-env
+    literals:
+      - OWM_DATABASE_DSN=postgres://owm:owm-dev-not-for-production@postgres:5432/owm?sslmode=disable
+      - OWM_DEV_MODE=true
+    options:
+      disableNameSuffixHash: true
+images:
+  - name: owm-coordinator
+    newName: owm-coordinator
+    newTag: latest

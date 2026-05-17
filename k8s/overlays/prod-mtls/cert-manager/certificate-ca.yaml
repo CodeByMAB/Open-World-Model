@@ -1,0 +1,15 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: owm-coordinator-ca
+spec:
+  isCA: true
+  commonName: owm-coordinator-ca
+  secretName: owm-coordinator-ca-tls
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: owm-bootstrap
+    kind: Issuer
+    group: cert-manager.io

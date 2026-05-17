@@ -4,6 +4,7 @@ package lightning
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -16,15 +17,18 @@ import (
 
 // LNDClient implements Client by calling LND's gRPC API.
 type LNDClient struct {
-	conn        *grpc.ClientConn
-	client      lnrpc.LightningClient
+	conn         *grpc.ClientConn
+	client       lnrpc.LightningClient
 	routerClient routerrpc.RouterClient
-	macaroonHex string
+	macaroonHex  string
 }
 
 // NewLNDClient dials LND at host with TLS from tlsCertPath and macaroon auth.
 // macaroonBytes is the raw macaroon file content (hex or binary).
 func NewLNDClient(host, tlsCertPath string, macaroonBytes []byte) (*LNDClient, error) {
+	if len(macaroonBytes) > 0 && tlsCertPath == "" {
+		return nil, fmt.Errorf("lightning.tls_cert_path is required when using LND macaroon auth: macaroons must not be sent over plaintext gRPC")
+	}
 	var opts []grpc.DialOption
 	if tlsCertPath != "" {
 		creds, err := credentials.NewClientTLSFromFile(tlsCertPath, "")
@@ -69,7 +73,7 @@ func (m *macaroonCredential) GetRequestMetadata(_ context.Context, _ ...string) 
 	return map[string]string{"macaroon": m.macaroonHex}, nil
 }
 
-func (m *macaroonCredential) RequireTransportSecurity() bool { return false }
+func (m *macaroonCredential) RequireTransportSecurity() bool { return true }
 
 func hexEncodeMacaroon(b []byte) string {
 	const hex = "0123456789abcdef"
@@ -81,21 +85,31 @@ func hexEncodeMacaroon(b []byte) string {
 	return string(out)
 }
 
+func normalizeNodePubkeyHex(s string) string {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "0x")
+	return strings.ToLower(s)
+}
+
 // ListChannels returns channels whose remote pubkey matches remotePubkeyHex.
 func (c *LNDClient) ListChannels(ctx context.Context, remotePubkeyHex string) ([]Channel, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	want := normalizeNodePubkeyHex(remotePubkeyHex)
 	resp, err := c.client.ListChannels(ctx, &lnrpc.ListChannelsRequest{})
 	if err != nil {
 		return nil, err
 	}
 	var out []Channel
 	for _, ch := range resp.Channels {
-		if ch.RemotePubkey != remotePubkeyHex {
+		if normalizeNodePubkeyHex(ch.RemotePubkey) != want {
 			continue
 		}
+		chID := ch.ChannelPoint
+		if chID == "" && ch.ChanId != 0 {
+			chID = fmt.Sprintf("%d", ch.ChanId)
+		}
 		out = append(out, Channel{
-			ChannelID:        fmt.Sprintf("%d", ch.ChanId),
+			ChannelID:        chID,
 			RemotePubkey:     ch.RemotePubkey,
 			CapacitySats:     ch.Capacity,
 			LocalBalanceSats: ch.LocalBalance,
@@ -151,8 +165,8 @@ func (c *LNDClient) AddInvoice(ctx context.Context, amountSats int64, memo strin
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	resp, err := c.client.AddInvoice(ctx, &lnrpc.Invoice{
-		Value: amountSats,
-		Memo:  memo,
+		Value:  amountSats,
+		Memo:   memo,
 		Expiry: expirySeconds,
 	})
 	if err != nil {
@@ -184,11 +198,22 @@ func (c *LNDClient) ForceCloseChan(ctx context.Context, channelID string) error 
 		FundingTxid: &lnrpc.ChannelPoint_FundingTxidStr{FundingTxidStr: txidStr},
 		OutputIndex: outputIndex,
 	}
-	_, err := c.client.CloseChannel(ctx, &lnrpc.CloseChannelRequest{
+	stream, err := c.client.CloseChannel(ctx, &lnrpc.CloseChannelRequest{
 		ChannelPoint: cp,
 		Force:        true,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // GetInfo returns node info.
@@ -200,7 +225,7 @@ func (c *LNDClient) GetInfo(ctx context.Context) (*NodeInfo, error) {
 		return nil, err
 	}
 	return &NodeInfo{
-		PubkeyHex:   fmt.Sprintf("%x", info.IdentityPubkey),
+		PubkeyHex:   info.IdentityPubkey,
 		Alias:       info.Alias,
 		BlockHeight: uint32(info.BlockHeight),
 	}, nil
@@ -219,16 +244,24 @@ func decodeHex(s string) []byte {
 	for i := 0; i < len(s); i += 2 {
 		var a, b byte
 		switch {
-		case s[i] >= '0' && s[i] <= '9': a = s[i] - '0'
-		case s[i] >= 'a' && s[i] <= 'f': a = s[i] - 'a' + 10
-		case s[i] >= 'A' && s[i] <= 'F': a = s[i] - 'A' + 10
-		default: return nil
+		case s[i] >= '0' && s[i] <= '9':
+			a = s[i] - '0'
+		case s[i] >= 'a' && s[i] <= 'f':
+			a = s[i] - 'a' + 10
+		case s[i] >= 'A' && s[i] <= 'F':
+			a = s[i] - 'A' + 10
+		default:
+			return nil
 		}
 		switch {
-		case s[i+1] >= '0' && s[i+1] <= '9': b = s[i+1] - '0'
-		case s[i+1] >= 'a' && s[i+1] <= 'f': b = s[i+1] - 'a' + 10
-		case s[i+1] >= 'A' && s[i+1] <= 'F': b = s[i+1] - 'A' + 10
-		default: return nil
+		case s[i+1] >= '0' && s[i+1] <= '9':
+			b = s[i+1] - '0'
+		case s[i+1] >= 'a' && s[i+1] <= 'f':
+			b = s[i+1] - 'a' + 10
+		case s[i+1] >= 'A' && s[i+1] <= 'F':
+			b = s[i+1] - 'A' + 10
+		default:
+			return nil
 		}
 		out[i/2] = a<<4 | b
 	}

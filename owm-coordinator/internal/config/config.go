@@ -12,7 +12,7 @@ import (
 
 // Config holds all coordinator runtime configuration.
 type Config struct {
-	DevMode   bool // when true, Lightning may use mock client; LND/macaroon not required
+	DevMode   bool `mapstructure:"dev_mode"` // when true, Lightning may use mock client; LND/macaroon not required
 	Server    ServerConfig
 	Database  DatabaseConfig
 	Redis     RedisConfig
@@ -26,66 +26,66 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	GRPCAddr    string        // e.g. ":9000"
-	HTTPAddr    string        // e.g. ":9001" (internal HTTP for health/metrics)
-	TLSCertFile string        // mTLS server cert
-	TLSKeyFile  string        // mTLS server key
-	CACertFile  string        // CA cert for verifying node certs
-	ShutdownTimeout time.Duration
+	GRPCAddr        string        `mapstructure:"grpc_addr"` // e.g. ":9000"
+	HTTPAddr        string        `mapstructure:"http_addr"` // e.g. ":9001" (internal HTTP for health/metrics)
+	TLSCertFile     string        `mapstructure:"tls_cert_file"`
+	TLSKeyFile      string        `mapstructure:"tls_key_file"`
+	CACertFile      string        `mapstructure:"ca_cert_file"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 }
 
 type DatabaseConfig struct {
-	DSN          string // postgres connection string
-	MaxOpenConns int
-	MaxIdleConns int
-	MigrationsDir string
+	DSN           string `mapstructure:"dsn"` // postgres connection string
+	MaxOpenConns  int    `mapstructure:"max_open_conns"`
+	MaxIdleConns  int    `mapstructure:"max_idle_conns"`
+	MigrationsDir string `mapstructure:"migrations_dir"`
 }
 
 type RedisConfig struct {
-	Addr     string
-	Password string
-	DB       int
+	Addr     string `mapstructure:"addr"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
 }
 
 type LightningConfig struct {
-	Backend              string // "lnd" | "cln", default "lnd"
-	LNDHost              string // e.g. "localhost:10009"
-	PaymentMacaroonPath  string
-	ReadonlyMacaroonPath string
-	SlashingMacaroonPath string
-	TLSCertPath          string
-	CLN                  CLNConfig
+	Backend              string    `mapstructure:"backend"` // "lnd" | "cln", default "lnd"
+	LNDHost              string    `mapstructure:"lnd_host"`
+	PaymentMacaroonPath  string    `mapstructure:"payment_macaroon_path"`
+	ReadonlyMacaroonPath string    `mapstructure:"readonly_macaroon_path"`
+	SlashingMacaroonPath string    `mapstructure:"slashing_macaroon_path"`
+	TLSCertPath          string    `mapstructure:"tls_cert_path"`
+	CLN                  CLNConfig `mapstructure:"cln"`
 }
 
-// CLNConfig holds Core Lightning REST API settings.
+// CLNConfig holds Core Lightning CLNRest settings.
 type CLNConfig struct {
-	BaseURL string // e.g. "https://cln:9745"
-	APIKey  string
+	BaseURL string `mapstructure:"base_url"` // e.g. "https://127.0.0.1:3010"
+	APIKey  string `mapstructure:"api_key"`  // CLN rune (Rune HTTP header)
 }
 
 type S3Config struct {
-	Endpoint  string
-	Bucket    string
-	AccessKey string
-	SecretKey string
-	Region    string
+	Endpoint  string `mapstructure:"endpoint"`
+	Bucket    string `mapstructure:"bucket"`
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
+	Region    string `mapstructure:"region"`
 }
 
 type FLConfig struct {
-	RoundIntervalMinutes int
-	MinParticipants      int
-	GradientL2ClipNorm   float64
-	AnomalyStdDevThreshold float64
-	TopKSparsificationPct  float64 // e.g. 0.10 = top 10%
+	RoundIntervalMinutes   int     `mapstructure:"round_interval_minutes"`
+	MinParticipants        int     `mapstructure:"min_participants"`
+	GradientL2ClipNorm     float64 `mapstructure:"gradient_l2_clip_norm"`
+	AnomalyStdDevThreshold float64 `mapstructure:"anomaly_std_dev_threshold"`
+	TopKSparsificationPct  float64 `mapstructure:"top_k_sparsification_pct"` // e.g. 0.10 = top 10%
 }
 
 type StakeConfig struct {
-	TierMinimumSats map[string]int64 // "t1" -> 100000, "t2" -> 500000, "t3" -> 2000000
-	VerifyIntervalHours int
-	DegradedGracePeriodHours int
-	SlashCooldownDays  int
-	T1AutoSlashSignals int // signals before automated slash for T1
-	T2T3MaintainerAcks int // maintainer acks required for T2/T3 slash
+	TierMinimumSats          map[string]int64 `mapstructure:"tier_minimum_sats"`
+	VerifyIntervalHours      int              `mapstructure:"verify_interval_hours"`
+	DegradedGracePeriodHours int              `mapstructure:"degraded_grace_period_hours"`
+	SlashCooldownDays        int              `mapstructure:"slash_cooldown_days"`
+	T1AutoSlashSignals       int              `mapstructure:"t1_auto_slash_signals"`
+	T2T3MaintainerAcks       int              `mapstructure:"t2t3_maintainer_acks"`
 }
 
 // TorConfig controls the optional Tor dual-transport layer (SRS-NET-01, ADR-005).
@@ -94,20 +94,10 @@ type StakeConfig struct {
 // to that address. Data-plane traffic (FL gradients, model weights, Stratum v2)
 // never goes through Tor regardless of this setting.
 type TorConfig struct {
-	// Enabled activates the Tor hidden service listener and SOCKS5 dialer.
-	Enabled bool
-	// LocalBindAddr is the address the coordinator listens on for forwarded
-	// Tor connections. The Tor daemon maps .onion:9000 → LocalBindAddr.
-	// Default: "127.0.0.1:9002"
-	LocalBindAddr string
-	// SOCKS5Addr is the outbound Tor SOCKS5 proxy address used when the
-	// coordinator needs to dial .onion endpoints (e.g. LND over Tor).
-	// Default: "127.0.0.1:9050"
-	SOCKS5Addr string
-	// HiddenServiceDir is the path to the Tor HiddenServiceDir. The coordinator
-	// reads HiddenServiceDir/hostname at startup to log the .onion address.
-	// Default: "/var/lib/tor/owm-coordinator"
-	HiddenServiceDir string
+	Enabled          bool   `mapstructure:"enabled"` // Tor hidden service listener and SOCKS5 dialer
+	LocalBindAddr    string `mapstructure:"local_bind_addr"`
+	SOCKS5Addr       string `mapstructure:"socks5_addr"`
+	HiddenServiceDir string `mapstructure:"hidden_service_dir"`
 }
 
 // ObserverConfig controls the Observer Protocol v0.1 receipt submission.
@@ -115,14 +105,14 @@ type TorConfig struct {
 // to the Observer Registry (api.observerprotocol.org) after each successful
 // Lightning payment. SigningKeyPath must point to an Ed25519 private key.
 type ObserverConfig struct {
-	Enabled        bool   // submit receipts to Observer Registry
-	APIEndpoint    string // e.g. "https://api.observerprotocol.org"
-	SigningKeyPath string // path to Ed25519 private key (PEM or raw hex)
+	Enabled        bool   `mapstructure:"enabled"`
+	APIEndpoint    string `mapstructure:"api_endpoint"`
+	SigningKeyPath string `mapstructure:"signing_key_path"`
 }
 
 type LogConfig struct {
-	Level  string // "debug" | "info" | "warn" | "error"
-	Format string // "json" | "console"
+	Level  string `mapstructure:"level"`  // "debug" | "info" | "warn" | "error"
+	Format string `mapstructure:"format"` // "json" | "console"
 }
 
 // Load reads configuration from environment variables (OWM_* prefix) and
@@ -134,9 +124,16 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("server.grpc_addr", ":9000")
 	v.SetDefault("server.http_addr", ":9001")
 	v.SetDefault("server.shutdown_timeout", "30s")
+	// Empty defaults so AutomaticEnv keys participate in Unmarshal (viper AllKeys).
+	v.SetDefault("server.tls_cert_file", "")
+	v.SetDefault("server.tls_key_file", "")
+	v.SetDefault("server.ca_cert_file", "")
+	v.SetDefault("database.dsn", "")
 	v.SetDefault("database.max_open_conns", 25)
 	v.SetDefault("database.max_idle_conns", 5)
 	v.SetDefault("database.migrations_dir", "migrations")
+	v.SetDefault("redis.addr", "")
+	v.SetDefault("redis.password", "")
 	v.SetDefault("redis.db", 0)
 	v.SetDefault("fl.round_interval_minutes", 60)
 	v.SetDefault("fl.min_participants", 3)
@@ -161,6 +158,19 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("log.format", "json")
 	v.SetDefault("dev_mode", false)
 	v.SetDefault("lightning.backend", "lnd")
+	v.SetDefault("lightning.lnd_host", "")
+	v.SetDefault("lightning.readonly_macaroon_path", "")
+	v.SetDefault("lightning.payment_macaroon_path", "")
+	v.SetDefault("lightning.slashing_macaroon_path", "")
+	v.SetDefault("lightning.tls_cert_path", "")
+	v.SetDefault("lightning.cln.base_url", "")
+	v.SetDefault("lightning.cln.api_key", "")
+	v.SetDefault("s3.endpoint", "")
+	v.SetDefault("s3.bucket", "")
+	v.SetDefault("s3.access_key", "")
+	v.SetDefault("s3.secret_key", "")
+	v.SetDefault("s3.region", "")
+	v.SetDefault("observer.signing_key_path", "")
 
 	// Environment variable binding (OWM_SERVER_GRPC_ADDR, etc.)
 	v.SetEnvPrefix("OWM")
@@ -191,16 +201,21 @@ func (c *Config) validate() error {
 	if c.Database.DSN == "" {
 		return fmt.Errorf("database.dsn (OWM_DATABASE_DSN) is required")
 	}
+	backend := strings.ToLower(strings.TrimSpace(c.Lightning.Backend))
+	if backend == "" {
+		backend = "lnd"
+	}
+	c.Lightning.Backend = backend
+
 	// In dev mode, Lightning credentials are optional (mock client is used).
 	if !c.DevMode {
-		backend := strings.ToLower(strings.TrimSpace(c.Lightning.Backend))
-		if backend == "" {
-			backend = "lnd"
-		}
 		switch backend {
 		case "lnd":
 			if c.Lightning.LNDHost == "" {
 				return fmt.Errorf("lightning.lnd_host (OWM_LIGHTNING_LND_HOST) is required for backend lnd (set OWM_DEV_MODE=true to use mock)")
+			}
+			if c.Lightning.TLSCertPath == "" {
+				return fmt.Errorf("lightning.tls_cert_path (OWM_LIGHTNING_TLS_CERT_PATH) is required for backend lnd when dev_mode is false: LND macaroon auth must use TLS to the node")
 			}
 			if c.Lightning.PaymentMacaroonPath == "" {
 				return fmt.Errorf("lightning.payment_macaroon_path is required for backend lnd")

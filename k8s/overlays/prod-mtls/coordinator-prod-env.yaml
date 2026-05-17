@@ -1,0 +1,13 @@
+# Duplicated from overlays/prod (Kustomize load restrictions: patches must live here).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator
+spec:
+  template:
+    spec:
+      containers:
+        - name: coordinator
+          env:
+            - name: OWM_DEV_MODE
+              value: "false"

@@ -23,6 +23,8 @@ FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /out/coordinator /coordinator
+# SQL migrations (golang-migrate file:// source at runtime)
+COPY --from=builder /src/migrations /migrations
 
 # gRPC port
 EXPOSE 9000

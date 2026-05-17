@@ -1,0 +1,11 @@
+# Same as prod + cert-manager in-cluster CA and gRPC server certificate.
+# With OWM_DEV_MODE=false, the coordinator enforces mTLS: every gRPC client must
+# present a cert signed by the same CA (issue Certificates for node identities).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ./cert-manager
+patches:
+  - path: coordinator-prod-env.yaml
+  - path: coordinator-tls-patch.yaml

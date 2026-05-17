@@ -1,0 +1,18 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: owm-coordinator-grpc
+spec:
+  secretName: owm-coordinator-grpc-tls
+  duration: 8760h
+  renewBefore: 720h
+  commonName: coordinator.owm.svc.cluster.local
+  dnsNames:
+    - coordinator.owm.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: owm-coordinator-ca-issuer
+    kind: Issuer
+    group: cert-manager.io

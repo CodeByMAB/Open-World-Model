@@ -1,0 +1,7 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: owm-coordinator-ca-issuer
+spec:
+  ca:
+    secretName: owm-coordinator-ca-tls
