@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -52,10 +53,20 @@ type RoundSummary struct {
 	CompletedAt    time.Time
 }
 
+// defaultOTSCalendars are the three standard OpenTimestamps calendar servers (SRS-OTS-02).
+var defaultOTSCalendars = []string{
+	"https://a.pool.opentimestamps.org/digest",
+	"https://b.pool.opentimestamps.org/digest",
+	"https://c.pool.opentimestamps.org/digest",
+}
+
 // OrchestratorConfig holds FL tuning parameters.
 type OrchestratorConfig struct {
 	GradientL2ClipNorm     float64
 	AnomalyStdDevThreshold float64
+	// OTSCalendars overrides the default three OTS calendar URLs (SRS-OTS-02).
+	// If empty, defaultOTSCalendars is used.
+	OTSCalendars []string
 }
 
 // Orchestrator manages FL round lifecycle.
@@ -69,6 +80,9 @@ type Orchestrator struct {
 	roundDurationSecs      int
 	gradientL2ClipNorm     float64
 	anomalyStdDevThreshold float64
+
+	otsCalendars []string
+	otsClient    *http.Client
 }
 
 // New creates an FL Orchestrator with sensible defaults.
@@ -80,6 +94,7 @@ func New(db *pgxpool.Pool, reg *registry.Registry, s3 *storage.S3Client, log *za
 func NewWithConfig(db *pgxpool.Pool, reg *registry.Registry, s3 *storage.S3Client, flCfg *OrchestratorConfig, log *zap.Logger) *Orchestrator {
 	clipNorm := 1.0
 	anomThreshold := 3.0
+	calendars := defaultOTSCalendars
 	if flCfg != nil {
 		if flCfg.GradientL2ClipNorm > 0 {
 			clipNorm = flCfg.GradientL2ClipNorm
@@ -87,16 +102,21 @@ func NewWithConfig(db *pgxpool.Pool, reg *registry.Registry, s3 *storage.S3Clien
 		if flCfg.AnomalyStdDevThreshold > 0 {
 			anomThreshold = flCfg.AnomalyStdDevThreshold
 		}
+		if len(flCfg.OTSCalendars) > 0 {
+			calendars = flCfg.OTSCalendars
+		}
 	}
 	return &Orchestrator{
-		db:                      db,
-		registry:                reg,
-		storage:                 s3,
-		log:                     log,
-		minParticipants:         3,
-		roundDurationSecs:       3600,
+		db:                     db,
+		registry:               reg,
+		storage:                s3,
+		log:                    log,
+		minParticipants:        3,
+		roundDurationSecs:      3600,
 		gradientL2ClipNorm:     clipNorm,
 		anomalyStdDevThreshold: anomThreshold,
+		otsCalendars:           calendars,
+		otsClient:              &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -565,39 +585,105 @@ func (o *Orchestrator) completeRound(ctx context.Context, roundNumber int32, agg
 	return err
 }
 
-// stampOTS submits the aggregate hash to OpenTimestamps and stores the proof path on success.
+// stampOTS submits the aggregated checkpoint hash to all configured OTS calendar servers
+// concurrently (SRS-OTS-01, SRS-OTS-02), stores the first returned binary proof in S3
+// under ots/round-{N}.ots, and records that key in fl_rounds. Called in a detached goroutine.
 func (o *Orchestrator) stampOTS(hashHex string, roundNumber int32) {
 	hashBytes, err := hex.DecodeString(hashHex)
 	if err != nil || len(hashBytes) != sha256.Size {
 		o.log.Warn("OTS stamp: invalid hash", zap.String("hash", hashHex))
 		return
 	}
+	if len(o.otsCalendars) == 0 {
+		o.log.Warn("OTS stamp: no calendars configured, skipping")
+		return
+	}
+
+	type calResult struct {
+		proof []byte
+		url   string
+		err   error
+	}
+	results := make(chan calResult, len(o.otsCalendars))
+	for _, calURL := range o.otsCalendars {
+		calURL := calURL
+		go func() {
+			proof, err := o.submitToOTSCalendar(calURL, hashBytes)
+			results <- calResult{proof: proof, url: calURL, err: err}
+		}()
+	}
+
+	var proofBytes []byte
+	successCount := 0
+	for range o.otsCalendars {
+		res := <-results
+		if res.err != nil {
+			o.log.Warn("OTS stamp: calendar failed",
+				zap.String("calendar", res.url), zap.Error(res.err))
+			continue
+		}
+		successCount++
+		o.log.Info("OTS stamp: calendar accepted",
+			zap.String("calendar", res.url), zap.Int("proof_bytes", len(res.proof)))
+		if proofBytes == nil {
+			proofBytes = res.proof
+		}
+	}
+
+	if successCount == 0 {
+		o.log.Warn("OTS stamp: all calendars failed, proof not stored",
+			zap.String("hash", hashHex), zap.Int32("round", roundNumber))
+		return
+	}
+
+	s3Key := fmt.Sprintf("ots/round-%d.ots", roundNumber)
+	if o.storage != nil && len(proofBytes) > 0 {
+		if _, err := o.storage.PutObject(context.Background(), s3Key, proofBytes); err != nil {
+			o.log.Warn("OTS stamp: S3 upload failed",
+				zap.String("key", s3Key), zap.Error(err))
+			// Still record the key — the path marks the intent and can be retried.
+		}
+	}
+
+	if _, err := o.db.Exec(context.Background(),
+		`UPDATE fl_rounds SET ots_proof_path = $2 WHERE round_number = $1`,
+		roundNumber, s3Key,
+	); err != nil {
+		o.log.Warn("OTS stamp: DB update failed", zap.Error(err))
+		return
+	}
+	o.log.Info("OTS stamp: proof recorded",
+		zap.Int32("round", roundNumber),
+		zap.String("path", s3Key),
+		zap.Int("calendars_succeeded", successCount),
+	)
+}
+
+// submitToOTSCalendar POSTs hashBytes to one OTS calendar and returns the binary proof.
+func (o *Orchestrator) submitToOTSCalendar(calURL string, hashBytes []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://a.pool.opentimestamps.org/digest", bytes.NewReader(hashBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, calURL, bytes.NewReader(hashBytes))
 	if err != nil {
-		o.log.Warn("OTS stamp: request build failed", zap.Error(err))
-		return
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := o.otsClient.Do(req)
 	if err != nil {
-		o.log.Warn("OTS stamp: request failed", zap.Error(err))
-		return
+		return nil, err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		o.log.Warn("OTS stamp: non-OK status", zap.Int("status", resp.StatusCode))
-		return
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	proofPath := fmt.Sprintf("ots-round-%d.ots", roundNumber)
-	_, err = o.db.Exec(context.Background(),
-		`UPDATE fl_rounds SET ots_proof_path = $2 WHERE round_number = $1`,
-		roundNumber, proofPath,
-	)
+	proof, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024)) // 64 KB cap
 	if err != nil {
-		o.log.Warn("OTS stamp: DB update failed", zap.Error(err))
+		return nil, fmt.Errorf("reading proof: %w", err)
 	}
+	if len(proof) == 0 {
+		return nil, fmt.Errorf("empty proof body")
+	}
+	return proof, nil
 }
 
 func (o *Orchestrator) failRound(ctx context.Context, roundNumber int32, reason string) error {
