@@ -180,8 +180,8 @@ func (r *Registry) Activate(ctx context.Context, nodeID uuid.UUID) error {
 	return nil
 }
 
-// RecordHeartbeat updates last_heartbeat and node metrics, returning the
-// number of pending tasks for that node.
+// RecordHeartbeat updates last_heartbeat, appends to heartbeat_log for uptime
+// tracking (SRS-SCHED-04), and returns the number of pending tasks for that node.
 func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendingTasks int, err error) {
 	now := time.Now().UTC()
 	err = r.db.QueryRow(ctx,
@@ -189,6 +189,13 @@ func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendi
 		 RETURNING (SELECT count(*) FROM tasks WHERE assigned_node = $2 AND status = 'pending')`,
 		now, nodeID,
 	).Scan(&pendingTasks)
+	if err != nil {
+		return 0, err
+	}
+	_, err = r.db.Exec(ctx,
+		`INSERT INTO heartbeat_log (node_id, recorded_at) VALUES ($1, $2)`,
+		nodeID, now,
+	)
 	return pendingTasks, err
 }
 
@@ -259,27 +266,94 @@ func (r *Registry) UpdateStatus(ctx context.Context, nodeID uuid.UUID, status st
 	return err
 }
 
-// UpdateReliability recalculates and persists a node's reliability score.
-// reliability = (successful_tasks / total_tasks) * uptime_fraction (rolling 7d).
+// UpdateReliability recalculates and persists a node's reliability score using
+// the full SRS-SCHED-04 formula over a rolling 7-day window:
+//
+//	reliability = task_success_fraction × uptime_fraction
+//
+// uptime_fraction is derived from heartbeat_log (SRS-NODE-04: 60 s interval).
+// success=true increments the total_tasks counter; false does not (the task
+// completion is already recorded in the tasks table and counted there).
 func (r *Registry) UpdateReliability(ctx context.Context, nodeID uuid.UUID, success bool) error {
-	var col string
-	if success {
-		col = "total_tasks = total_tasks + 1"
-	} else {
-		col = "reliability = reliability"
+	// Clamp the window start to the node's registration time so brand-new nodes
+	// are not penalised for the days before they existed.
+	var registeredAt time.Time
+	if err := r.db.QueryRow(ctx,
+		`SELECT registered_at FROM nodes WHERE node_id = $1`, nodeID,
+	).Scan(&registeredAt); err != nil {
+		return fmt.Errorf("fetching registration time: %w", err)
 	}
-	// Simplified reliability update; a full implementation uses a time-windowed query.
+	windowStart := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	if registeredAt.After(windowStart) {
+		windowStart = registeredAt
+	}
+
+	// Count tasks in the window.
+	var totalTasks, completedTasks int64
+	if err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'completed')
+		 FROM tasks WHERE assigned_node = $1 AND submitted_at > $2`,
+		nodeID, windowStart,
+	).Scan(&totalTasks, &completedTasks); err != nil {
+		return fmt.Errorf("counting tasks: %w", err)
+	}
+
+	// Count heartbeats in the window.
+	var receivedHB int64
+	if err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM heartbeat_log WHERE node_id = $1 AND recorded_at > $2`,
+		nodeID, windowStart,
+	).Scan(&receivedHB); err != nil {
+		return fmt.Errorf("counting heartbeats: %w", err)
+	}
+
+	reliability := computeReliability(completedTasks, totalTasks, receivedHB, time.Since(windowStart))
+
+	successIncr := 0
+	if success {
+		successIncr = 1
+	}
 	_, err := r.db.Exec(ctx,
-		fmt.Sprintf(`UPDATE nodes SET %s, reliability = (
-			SELECT COALESCE(
-				COUNT(*) FILTER (WHERE status = 'completed')::NUMERIC /
-				NULLIF(COUNT(*), 0), 1.0
-			) FROM tasks WHERE assigned_node = $1
-			  AND submitted_at > now() - INTERVAL '7 days'
-		) WHERE node_id = $1`, col),
-		nodeID,
+		`UPDATE nodes SET reliability = $2, total_tasks = total_tasks + $3 WHERE node_id = $1`,
+		nodeID, reliability, successIncr,
 	)
 	return err
+}
+
+// computeReliability implements SRS-SCHED-04:
+//
+//	reliability = task_success_fraction × uptime_fraction
+//
+// task_success_fraction = completed / max(total, 1)  [1.0 when no tasks yet]
+// uptime_fraction       = receivedHB / expectedHB    [1.0 when window < 1 interval]
+// expectedHB            = windowDuration / 60 s      (SRS-NODE-04 heartbeat rate)
+//
+// Both fractions are clamped to [0, 1] and the result is clamped to [0, 1].
+func computeReliability(completed, total, receivedHB int64, windowDuration time.Duration) float64 {
+	const heartbeatIntervalSecs = 60.0
+
+	taskFraction := 1.0
+	if total > 0 {
+		taskFraction = float64(completed) / float64(total)
+	}
+
+	expectedHB := windowDuration.Seconds() / heartbeatIntervalSecs
+	uptimeFraction := 1.0
+	if expectedHB >= 1.0 {
+		uptimeFraction = float64(receivedHB) / expectedHB
+		if uptimeFraction > 1 {
+			uptimeFraction = 1
+		}
+	}
+
+	r := taskFraction * uptimeFraction
+	if r < 0 {
+		return 0
+	}
+	if r > 1 {
+		return 1
+	}
+	return r
 }
 
 // IsSuspendedOrCoolingDown returns true if the node's public key is currently
