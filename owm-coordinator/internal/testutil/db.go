@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -36,7 +37,17 @@ func MustDB(t *testing.T) *pgxpool.Pool {
 	migrationsDir := filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations")
 	migrationsDir, _ = filepath.Abs(migrationsDir)
 
-	m, err := migrate.New("file://"+migrationsDir, dsn)
+	// golang-migrate uses the pq driver which requires sslmode=disable on
+	// servers without TLS (e.g. the CI Postgres service container).
+	migrDSN := dsn
+	if !strings.Contains(migrDSN, "sslmode=") {
+		if strings.Contains(migrDSN, "?") {
+			migrDSN += "&sslmode=disable"
+		} else {
+			migrDSN += "?sslmode=disable"
+		}
+	}
+	m, err := migrate.New("file://"+migrationsDir, migrDSN)
 	if err != nil {
 		t.Fatalf("testutil.MustDB: migrate.New: %v", err)
 	}

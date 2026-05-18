@@ -155,10 +155,14 @@ func TestGRPCServer_RejectsClientWithoutCert(t *testing.T) {
 		t.Fatalf("expected Unavailable (TLS handshake rejection), got %v: %v", st.Code(), rpcErr)
 	}
 
-	// The error message should reference the TLS/handshake/certificate failure.
+	// The error message should reference TLS rejection. On some Linux kernels the
+	// server resets the TCP connection before the handshake completes, so the
+	// client sees "broken pipe" instead of a TLS-layer message — both indicate
+	// the server correctly refused the unauthenticated client.
 	errMsg := strings.ToLower(rpcErr.Error())
-	if !strings.Contains(errMsg, "handshake") && !strings.Contains(errMsg, "certificate") && !strings.Contains(errMsg, "tls") {
-		t.Fatalf("expected error to mention TLS/handshake/certificate, got: %v", rpcErr)
+	if !strings.Contains(errMsg, "handshake") && !strings.Contains(errMsg, "certificate") &&
+		!strings.Contains(errMsg, "tls") && !strings.Contains(errMsg, "broken pipe") {
+		t.Fatalf("expected error to mention TLS/handshake/certificate/broken pipe, got: %v", rpcErr)
 	}
 
 	t.Logf("got expected error (mTLS rejection): %v", rpcErr)

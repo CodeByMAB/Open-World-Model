@@ -46,9 +46,7 @@ func NewLNDClient(host, tlsCertPath string, macaroonBytes []byte) (*LNDClient, e
 		opts = append(opts, grpc.WithPerRPCCredentials(&macaroonCredential{macaroonHex: macHex}))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	conn, err := grpc.DialContext(ctx, host, append(opts, grpc.WithBlock())...)
+	conn, err := grpc.NewClient(host, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("dialing LND: %w", err)
 	}
