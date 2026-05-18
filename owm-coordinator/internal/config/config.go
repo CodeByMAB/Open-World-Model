@@ -248,5 +248,75 @@ func (c *Config) validate() error {
 	if c.Observer.Enabled && strings.TrimSpace(c.Observer.APIEndpoint) == "" {
 		return fmt.Errorf("observer.api_endpoint is required when observer.enabled is true")
 	}
+
+	// ── Stake tier minimums (BRS-POS-02) ─────────────────────────────────────
+	// Each tier's configured minimum must be at or above the BRS floor.
+	tierFloors := []struct {
+		key   string
+		floor int64
+	}{
+		{"t1", 100_000},
+		{"t2", 500_000},
+		{"t3", 2_000_000},
+	}
+	for _, tf := range tierFloors {
+		val := c.Stake.TierMinimumSats[tf.key]
+		if val < tf.floor {
+			return fmt.Errorf("stake.tier_minimum_sats.%s must be ≥ %d sats (BRS-POS-02), got %d",
+				tf.key, tf.floor, val)
+		}
+	}
+	t1, t2, t3 := c.Stake.TierMinimumSats["t1"], c.Stake.TierMinimumSats["t2"], c.Stake.TierMinimumSats["t3"]
+	if t1 > t2 || t2 > t3 {
+		return fmt.Errorf("stake tier minimums must be ordered t1 ≤ t2 ≤ t3 (got t1=%d t2=%d t3=%d)", t1, t2, t3)
+	}
+
+	// ── Stake operational config ──────────────────────────────────────────────
+	if c.Stake.VerifyIntervalHours < 1 {
+		return fmt.Errorf("stake.verify_interval_hours must be ≥ 1, got %d", c.Stake.VerifyIntervalHours)
+	}
+	if c.Stake.DegradedGracePeriodHours < 1 {
+		return fmt.Errorf("stake.degraded_grace_period_hours must be ≥ 1, got %d", c.Stake.DegradedGracePeriodHours)
+	}
+	if c.Stake.SlashCooldownDays < 1 {
+		return fmt.Errorf("stake.slash_cooldown_days must be ≥ 1, got %d", c.Stake.SlashCooldownDays)
+	}
+	// SRS-STAKE-04: T1 requires ≥ 3 signals; T2/T3 requires ≥ 2 maintainer acks.
+	if c.Stake.T1AutoSlashSignals < 3 {
+		return fmt.Errorf("stake.t1_auto_slash_signals must be ≥ 3 (SRS-STAKE-04), got %d", c.Stake.T1AutoSlashSignals)
+	}
+	if c.Stake.T2T3MaintainerAcks < 2 {
+		return fmt.Errorf("stake.t2t3_maintainer_acks must be ≥ 2 (SRS-STAKE-04), got %d", c.Stake.T2T3MaintainerAcks)
+	}
+
+	// ── FL config bounds ──────────────────────────────────────────────────────
+	if c.FL.MinParticipants < 2 {
+		return fmt.Errorf("fl.min_participants must be ≥ 2, got %d", c.FL.MinParticipants)
+	}
+	if c.FL.GradientL2ClipNorm <= 0 {
+		return fmt.Errorf("fl.gradient_l2_clip_norm must be > 0, got %g", c.FL.GradientL2ClipNorm)
+	}
+	if c.FL.AnomalyStdDevThreshold <= 0 {
+		return fmt.Errorf("fl.anomaly_std_dev_threshold must be > 0, got %g", c.FL.AnomalyStdDevThreshold)
+	}
+	if c.FL.RoundIntervalMinutes < 1 {
+		return fmt.Errorf("fl.round_interval_minutes must be ≥ 1, got %d", c.FL.RoundIntervalMinutes)
+	}
+	if c.FL.TopKSparsificationPct < 0 || c.FL.TopKSparsificationPct > 1 {
+		return fmt.Errorf("fl.top_k_sparsification_pct must be in [0, 1], got %g", c.FL.TopKSparsificationPct)
+	}
+
+	// ── S3 group check ────────────────────────────────────────────────────────
+	// S3 credentials are optional, but if any field is provided all four must be.
+	s3Count := 0
+	for _, v := range []string{c.S3.Endpoint, c.S3.Bucket, c.S3.AccessKey, c.S3.SecretKey} {
+		if v != "" {
+			s3Count++
+		}
+	}
+	if s3Count > 0 && s3Count < 4 {
+		return fmt.Errorf("s3 is partially configured: endpoint, bucket, access_key, and secret_key must all be set together (or all left empty)")
+	}
+
 	return nil
 }
