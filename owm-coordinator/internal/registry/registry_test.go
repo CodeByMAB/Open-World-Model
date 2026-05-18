@@ -1,10 +1,12 @@
 package registry_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/owmnetwork/owm-coordinator/internal/registry"
+	"github.com/owmnetwork/owm-coordinator/internal/testutil"
 )
 
 // TestCanonicalRegisterMessageFormat verifies that signature inputs cannot be
@@ -61,9 +63,60 @@ func TestNodeCapabilitiesZeroValue(t *testing.T) {
 }
 
 // Integration tests require a live PostgreSQL instance.
-// Run with: OWM_TEST_DSN=postgres://... go test ./internal/registry/... -tags integration
+// Run with: OWM_TEST_DSN=postgres://... go test ./internal/registry/...
 
 func TestRegisterIntegration(t *testing.T) {
-	t.Skip("integration test — set OWM_TEST_DSN and remove t.Skip to run")
-	_ = time.Now() // placeholder — real test would create pgxpool, call Register, etc.
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+	nf := testutil.NewNodeFixture(t)
+
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{
+		Tier:               registry.TierT1,
+		VRAMGB:             8,
+		RAMGB:              16,
+		BandwidthMbps:      100,
+		SupportedTaskTypes: []string{"inference"},
+	}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if node.Status != registry.StatusPending {
+		t.Errorf("status: got %q, want %q", node.Status, registry.StatusPending)
+	}
+	if node.Tier != registry.TierT1 {
+		t.Errorf("tier: got %q, want %q", node.Tier, registry.TierT1)
+	}
+
+	// Activate transitions pending → active.
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	got, err := reg.GetByPublicKey(ctx, nf.PubKeyHex)
+	if err != nil {
+		t.Fatalf("GetByPublicKey: %v", err)
+	}
+	if got.Status != registry.StatusActive {
+		t.Errorf("post-activate status: got %q, want %q", got.Status, registry.StatusActive)
+	}
+
+	// Re-registration resets to pending (idempotent upsert).
+	ts2 := time.Now().Unix()
+	sig2 := nf.Sign(nf.LNNodeURI, registry.TierT1, ts2)
+	node2, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig2, ts2)
+	if err != nil {
+		t.Fatalf("re-Register: %v", err)
+	}
+	if node2.NodeID != node.NodeID {
+		t.Errorf("re-register: node_id changed: got %s, want %s", node2.NodeID, node.NodeID)
+	}
+	if node2.Status != registry.StatusPending {
+		t.Errorf("re-register status: got %q, want %q", node2.Status, registry.StatusPending)
+	}
 }
