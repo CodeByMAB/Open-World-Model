@@ -121,6 +121,16 @@ func TestUpdateReliabilityIntegration(t *testing.T) {
 		t.Fatalf("Activate: %v", err)
 	}
 
+	// Backdate registered_at so the window start (max(now-7d, registered_at))
+	// is 2 hours ago, allowing the historical heartbeat and task data below to
+	// fall inside the window.
+	if _, err := pool.Exec(ctx,
+		`UPDATE nodes SET registered_at = now() - interval '2 hours' WHERE node_id = $1`,
+		node.NodeID,
+	); err != nil {
+		t.Fatalf("backdate registered_at: %v", err)
+	}
+
 	// Seed 60 heartbeats directly (representing ~1 hour of uptime).
 	base := time.Now().UTC().Add(-61 * time.Minute)
 	for i := 0; i < 60; i++ {

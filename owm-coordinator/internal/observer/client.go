@@ -130,9 +130,10 @@ func (c *Client) Submit(ctx context.Context, r Receipt) (receiptID string, err e
 // 32-byte seed material (64-char hex or 32 raw bytes) is expanded via Ed25519
 // seed expansion so SignReceipt receives a full private key.
 func decodeSigningKey(data []byte) ([]byte, error) {
-	// Raw bytes: check BEFORE TrimSpace — binary keys can contain bytes that
-	// TrimSpace would strip (e.g. 0x0A, 0x20), corrupting the length.
-	if len(data) == 32 || len(data) == ed25519.PrivateKeySize {
+	// Raw binary: check BEFORE TrimSpace so whitespace bytes (0x0A, 0x20, …)
+	// at the key boundary are not stripped. Hex strings (all bytes in [0-9a-fA-F])
+	// of the same length are intentionally excluded and handled below.
+	if (len(data) == 32 || len(data) == ed25519.PrivateKeySize) && !hexEncoded(data) {
 		return normalizeToFullPrivateKey(data)
 	}
 	data = bytes.TrimSpace(data)

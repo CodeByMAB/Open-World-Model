@@ -202,7 +202,7 @@ func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendi
 // GetByPublicKey retrieves a node by its Ed25519 public key.
 func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node, error) {
 	const q = `
-		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
+		SELECT node_id, public_key, ln_node_uri, COALESCE(onion_address, ''), tier, vram_gb, ram_gb,
 		       bandwidth_mbps, supported_task_types, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE public_key = $1`
@@ -223,7 +223,7 @@ func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node,
 // ListActive returns all nodes currently in active status.
 func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 	const q = `
-		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
+		SELECT node_id, public_key, ln_node_uri, COALESCE(onion_address, ''), tier, vram_gb, ram_gb,
 		       bandwidth_mbps, supported_task_types, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE status = 'active' ORDER BY reliability DESC`
