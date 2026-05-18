@@ -139,3 +139,50 @@ func TestRequeueTimedOutIntegration(t *testing.T) {
 		t.Errorf("task status after requeue: got %q, want pending", status)
 	}
 }
+
+// TestScheduleIntegration_TaskTypeMismatch verifies that a node declaring
+// specific supported task types is NOT assigned tasks it doesn't support,
+// and IS assigned tasks it does support.
+func TestScheduleIntegration_TaskTypeMismatch(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+
+	// Register a node that only supports "fl_round".
+	nf := testutil.NewNodeFixture(t)
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{
+		Tier:               registry.TierT1,
+		VRAMGB:             8,
+		RAMGB:              16,
+		BandwidthMbps:      100,
+		SupportedTaskTypes: []string{string(scheduler.TaskFLRound)},
+	}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+
+	// Scheduling an unsupported task type must fail — no eligible nodes.
+	_, err = sched.Schedule(ctx, scheduler.TaskInference, "hash-inference", 60)
+	if err == nil {
+		t.Fatal("expected error: no node supports inference, but Schedule succeeded")
+	}
+
+	// Scheduling the supported task type must succeed.
+	a, err := sched.Schedule(ctx, scheduler.TaskFLRound, "hash-fl", 120)
+	if err != nil {
+		t.Fatalf("Schedule fl_round: %v", err)
+	}
+	if a.NodeID != node.NodeID {
+		t.Errorf("assigned node: got %s, want %s", a.NodeID, node.NodeID)
+	}
+}

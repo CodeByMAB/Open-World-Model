@@ -177,16 +177,36 @@ func (s *Scheduler) RequeueTimedOut(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// filterEligible returns nodes that meet the minimum tier for the task.
-func (s *Scheduler) filterEligible(_ context.Context, nodes []*registry.Node, _ TaskType, minTierNum int) []*registry.Node {
+// filterEligible returns nodes that meet both the minimum tier and task type
+// support requirements. A node with an empty SupportedTaskTypes slice accepts
+// any task type (backward-compatible default).
+func (s *Scheduler) filterEligible(_ context.Context, nodes []*registry.Node, taskType TaskType, minTierNum int) []*registry.Node {
 	tierNums := map[string]int{"t1": 1, "t2": 2, "t3": 3}
 	var out []*registry.Node
 	for _, n := range nodes {
-		if tierNums[n.Tier] >= minTierNum {
-			out = append(out, n)
+		if tierNums[n.Tier] < minTierNum {
+			continue
 		}
+		if !supportsTaskType(n.SupportedTaskTypes, taskType) {
+			continue
+		}
+		out = append(out, n)
 	}
 	return out
+}
+
+// supportsTaskType returns true when a node's declared list allows the given
+// task type, or when the list is empty (meaning the node accepts all types).
+func supportsTaskType(supported []string, taskType TaskType) bool {
+	if len(supported) == 0 {
+		return true
+	}
+	for _, tt := range supported {
+		if tt == string(taskType) {
+			return true
+		}
+	}
+	return false
 }
 
 // selectNode picks the best node using a weighted score:

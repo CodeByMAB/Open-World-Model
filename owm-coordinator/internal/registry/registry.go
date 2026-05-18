@@ -35,20 +35,21 @@ const (
 
 // Node represents a registered OWM network participant.
 type Node struct {
-	NodeID        uuid.UUID
-	PublicKey     string  // Ed25519 hex
-	LNNodeURI     string  // pubkey@host:port (clearnet or .onion)
-	OnionAddress  string  // optional Tor v3 .onion hostname for control-plane access
-	Tier          string
-	VRAMGB        float64
-	RAMGB         float64
-	BandwidthMbps float64
-	Reliability   float64 // 0.0–1.0 rolling 7-day
-	TotalTasks    int64
-	TotalSats     int64
-	Status        string
-	RegisteredAt  time.Time
-	LastHeartbeat *time.Time
+	NodeID             uuid.UUID
+	PublicKey          string   // Ed25519 hex
+	LNNodeURI          string   // pubkey@host:port (clearnet or .onion)
+	OnionAddress       string   // optional Tor v3 .onion hostname for control-plane access
+	Tier               string
+	VRAMGB             float64
+	RAMGB              float64
+	BandwidthMbps      float64
+	SupportedTaskTypes []string // task types this node accepts; empty = all types
+	Reliability        float64  // 0.0–1.0 rolling 7-day
+	TotalTasks         int64
+	TotalSats          int64
+	Status             string
+	RegisteredAt       time.Time
+	LastHeartbeat      *time.Time
 }
 
 // NodeCapabilities describes the hardware offered by a registering node.
@@ -92,18 +93,23 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 	}
 
 	// Upsert node — if pubkey already exists, update capabilities and reset to pending.
+	supportedTypes := caps.SupportedTaskTypes
+	if supportedTypes == nil {
+		supportedTypes = []string{}
+	}
 	node := &Node{
-		NodeID:        uuid.New(),
-		PublicKey:     pubKeyHex,
-		LNNodeURI:     lnURI,
-		OnionAddress:  onionAddr,
-		Tier:          caps.Tier,
-		VRAMGB:        caps.VRAMGB,
-		RAMGB:         caps.RAMGB,
-		BandwidthMbps: caps.BandwidthMbps,
-		Reliability:   1.0,
-		Status:        StatusPending,
-		RegisteredAt:  time.Now().UTC(),
+		NodeID:             uuid.New(),
+		PublicKey:          pubKeyHex,
+		LNNodeURI:          lnURI,
+		OnionAddress:       onionAddr,
+		Tier:               caps.Tier,
+		VRAMGB:             caps.VRAMGB,
+		RAMGB:              caps.RAMGB,
+		BandwidthMbps:      caps.BandwidthMbps,
+		SupportedTaskTypes: supportedTypes,
+		Reliability:        1.0,
+		Status:             StatusPending,
+		RegisteredAt:       time.Now().UTC(),
 	}
 
 	// Capture existing tier/status before the upsert so re-registration can
@@ -113,17 +119,19 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 			SELECT tier, status FROM nodes WHERE public_key = $2
 		)
 		INSERT INTO nodes (node_id, public_key, ln_node_uri, onion_address, tier,
-		                   vram_gb, ram_gb, bandwidth_mbps, reliability, status, registered_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                   vram_gb, ram_gb, bandwidth_mbps, reliability, status,
+		                   registered_at, supported_task_types)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (public_key) DO UPDATE
-			SET ln_node_uri    = EXCLUDED.ln_node_uri,
-			    onion_address  = EXCLUDED.onion_address,
-			    tier           = EXCLUDED.tier,
-			    vram_gb        = EXCLUDED.vram_gb,
-			    ram_gb         = EXCLUDED.ram_gb,
-			    bandwidth_mbps = EXCLUDED.bandwidth_mbps,
-			    status         = 'pending',
-			    registered_at  = EXCLUDED.registered_at
+			SET ln_node_uri          = EXCLUDED.ln_node_uri,
+			    onion_address        = EXCLUDED.onion_address,
+			    tier                 = EXCLUDED.tier,
+			    vram_gb              = EXCLUDED.vram_gb,
+			    ram_gb               = EXCLUDED.ram_gb,
+			    bandwidth_mbps       = EXCLUDED.bandwidth_mbps,
+			    supported_task_types = EXCLUDED.supported_task_types,
+			    status               = 'pending',
+			    registered_at        = EXCLUDED.registered_at
 		RETURNING node_id, status,
 		          (SELECT tier   FROM prior) AS prior_tier,
 		          (SELECT status FROM prior) AS prior_status`
@@ -131,7 +139,7 @@ func (r *Registry) Register(ctx context.Context, pubKeyHex, lnURI, onionAddr str
 	row := r.db.QueryRow(ctx, q,
 		node.NodeID, node.PublicKey, node.LNNodeURI, node.OnionAddress, node.Tier,
 		node.VRAMGB, node.RAMGB, node.BandwidthMbps, node.Reliability,
-		node.Status, node.RegisteredAt,
+		node.Status, node.RegisteredAt, node.SupportedTaskTypes,
 	)
 
 	var priorTier, priorStatus *string
@@ -188,7 +196,7 @@ func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendi
 func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node, error) {
 	const q = `
 		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
-		       bandwidth_mbps, reliability, total_tasks, total_sats,
+		       bandwidth_mbps, supported_task_types, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE public_key = $1`
 
@@ -196,7 +204,7 @@ func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node,
 	row := r.db.QueryRow(ctx, q, pubKeyHex)
 	err := row.Scan(
 		&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.OnionAddress, &n.Tier,
-		&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.Reliability,
+		&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.SupportedTaskTypes, &n.Reliability,
 		&n.TotalTasks, &n.TotalSats, &n.Status, &n.RegisteredAt, &n.LastHeartbeat,
 	)
 	if err != nil {
@@ -209,7 +217,7 @@ func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node,
 func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 	const q = `
 		SELECT node_id, public_key, ln_node_uri, onion_address, tier, vram_gb, ram_gb,
-		       bandwidth_mbps, reliability, total_tasks, total_sats,
+		       bandwidth_mbps, supported_task_types, reliability, total_tasks, total_sats,
 		       status, registered_at, last_heartbeat
 		FROM nodes WHERE status = 'active' ORDER BY reliability DESC`
 
@@ -224,7 +232,7 @@ func (r *Registry) ListActive(ctx context.Context) ([]*Node, error) {
 		var n Node
 		if err := rows.Scan(
 			&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.OnionAddress, &n.Tier,
-			&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.Reliability,
+			&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.SupportedTaskTypes, &n.Reliability,
 			&n.TotalTasks, &n.TotalSats, &n.Status, &n.RegisteredAt, &n.LastHeartbeat,
 		); err != nil {
 			return nil, err
