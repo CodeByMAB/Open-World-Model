@@ -1,9 +1,15 @@
 package scheduler_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/owmnetwork/owm-coordinator/internal/registry"
 	"github.com/owmnetwork/owm-coordinator/internal/scheduler"
+	"github.com/owmnetwork/owm-coordinator/internal/testutil"
 )
 
 // TestTaskTypeConstants ensures task type values match the protobuf task_type strings.
@@ -48,10 +54,135 @@ func TestAssignmentFields(t *testing.T) {
 }
 
 // Integration tests require a live PostgreSQL instance.
+// Run with: OWM_TEST_DSN=postgres://... go test ./internal/scheduler/...
+
 func TestScheduleIntegration(t *testing.T) {
-	t.Skip("integration test — set OWM_TEST_DSN and remove t.Skip to run")
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+	nf := testutil.NewNodeFixture(t)
+
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{Tier: registry.TierT1, VRAMGB: 8, RAMGB: 16, BandwidthMbps: 100}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+	a, err := sched.Schedule(ctx, scheduler.TaskInference, "inputhash-abc", 60)
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	if a.NodeID != node.NodeID {
+		t.Errorf("assigned node: got %s, want %s", a.NodeID, node.NodeID)
+	}
+	if a.TaskType != scheduler.TaskInference {
+		t.Errorf("task type: got %s, want inference", a.TaskType)
+	}
+	if a.RewardSats <= 0 {
+		t.Errorf("reward_sats: expected > 0, got %d", a.RewardSats)
+	}
 }
 
 func TestRequeueTimedOutIntegration(t *testing.T) {
-	t.Skip("integration test — set OWM_TEST_DSN and remove t.Skip to run")
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+	nf := testutil.NewNodeFixture(t)
+
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{Tier: registry.TierT1, VRAMGB: 8, RAMGB: 16, BandwidthMbps: 100}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	// Insert a task that started 2 minutes ago with a 60-second timeout (already timed out).
+	taskID := uuid.New()
+	_, err = pool.Exec(ctx,
+		`INSERT INTO tasks
+		    (task_id, task_type, assigned_node, node_ln_uri, status, input_hash,
+		     reward_sats, submitted_at, started_at, timeout_seconds)
+		 VALUES ($1, 'inference', $2, $3, 'running', 'hash', 10,
+		         now() - interval '2 minutes', now() - interval '2 minutes', 60)`,
+		taskID, node.NodeID, node.LNNodeURI,
+	)
+	if err != nil {
+		t.Fatalf("insert timed-out task: %v", err)
+	}
+
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+	n, err := sched.RequeueTimedOut(ctx)
+	if err != nil {
+		t.Fatalf("RequeueTimedOut: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("requeued count: got %d, want 1", n)
+	}
+
+	var status string
+	_ = pool.QueryRow(ctx, `SELECT status FROM tasks WHERE task_id = $1`, taskID).Scan(&status)
+	if status != "pending" {
+		t.Errorf("task status after requeue: got %q, want pending", status)
+	}
+}
+
+// TestScheduleIntegration_TaskTypeMismatch verifies that a node declaring
+// specific supported task types is NOT assigned tasks it doesn't support,
+// and IS assigned tasks it does support.
+func TestScheduleIntegration_TaskTypeMismatch(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+
+	// Register a node that only supports "fl_round".
+	nf := testutil.NewNodeFixture(t)
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{
+		Tier:               registry.TierT1,
+		VRAMGB:             8,
+		RAMGB:              16,
+		BandwidthMbps:      100,
+		SupportedTaskTypes: []string{string(scheduler.TaskFLRound)},
+	}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+
+	// Scheduling an unsupported task type must fail — no eligible nodes.
+	_, err = sched.Schedule(ctx, scheduler.TaskInference, "hash-inference", 60)
+	if err == nil {
+		t.Fatal("expected error: no node supports inference, but Schedule succeeded")
+	}
+
+	// Scheduling the supported task type must succeed.
+	a, err := sched.Schedule(ctx, scheduler.TaskFLRound, "hash-fl", 120)
+	if err != nil {
+		t.Fatalf("Schedule fl_round: %v", err)
+	}
+	if a.NodeID != node.NodeID {
+		t.Errorf("assigned node: got %s, want %s", a.NodeID, node.NodeID)
+	}
 }

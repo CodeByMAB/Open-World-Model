@@ -130,6 +130,12 @@ func (c *Client) Submit(ctx context.Context, r Receipt) (receiptID string, err e
 // 32-byte seed material (64-char hex or 32 raw bytes) is expanded via Ed25519
 // seed expansion so SignReceipt receives a full private key.
 func decodeSigningKey(data []byte) ([]byte, error) {
+	// Raw binary: check BEFORE TrimSpace so whitespace bytes (0x0A, 0x20, …)
+	// at the key boundary are not stripped. Hex strings (all bytes in [0-9a-fA-F])
+	// of the same length are intentionally excluded and handled below.
+	if (len(data) == 32 || len(data) == ed25519.PrivateKeySize) && !hexEncoded(data) {
+		return normalizeToFullPrivateKey(data)
+	}
 	data = bytes.TrimSpace(data)
 	// Hex: 64 chars = 32-byte seed, 128 chars = 64-byte full key.
 	if len(data) >= 64 && len(data)%2 == 0 && hexEncoded(data) {
@@ -142,10 +148,6 @@ func decodeSigningKey(data []byte) ([]byte, error) {
 	// PEM: look for PRIVATE KEY and decode base64 block (minimal PEM parse).
 	if bytes.Contains(data, []byte("PRIVATE KEY")) {
 		return decodePEMEd25519PrivateKey(data)
-	}
-	// Raw bytes: 32 = seed, 64 = full key.
-	if len(data) == 32 || len(data) == ed25519.PrivateKeySize {
-		return normalizeToFullPrivateKey(data)
 	}
 	return nil, fmt.Errorf("invalid key format: need 32- or 64-byte raw, 64- or 128-char hex, or PEM")
 }
