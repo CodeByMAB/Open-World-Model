@@ -99,10 +99,14 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 		return nil, status.Errorf(codes.PermissionDenied, "registration failed: %v", err)
 	}
 
-	// Verify Lightning stake asynchronously; return pending if stake not yet confirmed.
+	// Verify Lightning stake; return pending when insufficient (SRS-STAKE-01, SRS-LN-11).
 	stakeResult, err := s.verifier.VerifyStake(ctx, req.PublicKey, caps.Tier)
-	if err != nil {
-		s.log.Warn("stake verification failed", zap.String("node_id", node.NodeID.String()), zap.Error(err))
+	if err != nil || !stakeResult.OK {
+		if err != nil {
+			s.log.Warn("stake verification error", zap.String("node_id", node.NodeID.String()), zap.Error(err))
+		} else {
+			s.log.Info("insufficient stake", zap.String("node_id", node.NodeID.String()), zap.String("reason", stakeResult.Error))
+		}
 		return &coordinatorv1.RegisterNodeResponse{
 			NodeId:    node.NodeID.String(),
 			Status:    "pending",
