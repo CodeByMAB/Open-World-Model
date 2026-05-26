@@ -50,6 +50,29 @@ var (
 		prometheus.CounterOpts{Name: "owm_observer_receipts_total", Help: "Observer Protocol receipt submissions by status"},
 		[]string{"status"},
 	)
+	// OwmRegistrationRateLimitedTotal counts registration attempts blocked by the per-IP
+	// rate limit (SRS-SEC-04: max 10 new nodes per IP per hour).
+	OwmRegistrationRateLimitedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "owm_registration_rate_limited_total", Help: "Registration attempts blocked by per-IP rate limit"},
+		[]string{"ip"},
+	)
+	// OwmStakedChannelsTotal is the gauge of active staked channels.
+	OwmStakedChannelsTotal = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "owm_staked_channels_total", Help: "Number of active staked channels"},
+	)
+	// OwmStakedSatsTotal is the gauge of total satoshis locked across all active node_stakes rows.
+	OwmStakedSatsTotal = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "owm_staked_sats_total", Help: "Total satoshis locked across all active node_stakes rows"},
+	)
+	// OwmDegradedNodesTotal is the gauge of nodes currently in 'degraded' status.
+	OwmDegradedNodesTotal = prometheus.NewGauge(
+		prometheus.GaugeOpts{Name: "owm_degraded_nodes_total", Help: "Number of nodes currently in degraded status"},
+	)
+	// OwmSlashingEventsTotal counts cumulative slashing events by tier.
+	OwmSlashingEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "owm_slashing_events_total", Help: "Cumulative slashing events by tier"},
+		[]string{"tier"},
+	)
 )
 
 func init() {
@@ -63,5 +86,10 @@ func init() {
 		OwmStakeVerificationsTotal,
 		OwmSlashEventsTotal,
 		OwmObserverReceiptsTotal,
+		OwmRegistrationRateLimitedTotal,
+		OwmStakedChannelsTotal,
+		OwmStakedSatsTotal,
+		OwmDegradedNodesTotal,
+		OwmSlashingEventsTotal,
 	)
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	coordinatorv1 "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1"
@@ -85,6 +87,11 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 		return nil, status.Error(codes.InvalidArgument, "public_key, ln_node_uri, and capabilities are required")
 	}
 
+	// Rate-limit new registrations per source IP (SRS-SEC-04: max 10 per hour).
+	if err := s.checkRegistrationRateLimit(ctx); err != nil {
+		return nil, err
+	}
+
 	caps := registry.NodeCapabilities{
 		Tier:               req.Capabilities.Tier,
 		VRAMGB:             float64(req.Capabilities.VramGb),
@@ -99,10 +106,14 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 		return nil, status.Errorf(codes.PermissionDenied, "registration failed: %v", err)
 	}
 
-	// Verify Lightning stake asynchronously; return pending if stake not yet confirmed.
+	// Verify Lightning stake; return pending when insufficient (SRS-STAKE-01, SRS-LN-11).
 	stakeResult, err := s.verifier.VerifyStake(ctx, req.PublicKey, caps.Tier)
-	if err != nil {
-		s.log.Warn("stake verification failed", zap.String("node_id", node.NodeID.String()), zap.Error(err))
+	if err != nil || !stakeResult.OK {
+		if err != nil {
+			s.log.Warn("stake verification error", zap.String("node_id", node.NodeID.String()), zap.Error(err))
+		} else {
+			s.log.Info("insufficient stake", zap.String("node_id", node.NodeID.String()), zap.String("reason", stakeResult.Error))
+		}
 		return &coordinatorv1.RegisterNodeResponse{
 			NodeId:    node.NodeID.String(),
 			Status:    "pending",
@@ -152,7 +163,9 @@ func (s *Server) Heartbeat(ctx context.Context, req *coordinatorv1.HeartbeatRequ
 	}, nil
 }
 
-// DeregisterNode marks a node as deregistered.
+// DeregisterNode handles voluntary node exit (SRS-STAKE-08).
+// The request must be signed by the node's own Ed25519 key to prevent
+// unauthorised deregistration.
 func (s *Server) DeregisterNode(ctx context.Context, req *coordinatorv1.DeregisterNodeRequest) (*coordinatorv1.DeregisterNodeResponse, error) {
 	if err := validateTimestamp(req.Timestamp); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "timestamp: %v", err)
@@ -163,11 +176,29 @@ func (s *Server) DeregisterNode(ctx context.Context, req *coordinatorv1.Deregist
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node_id: %v", err)
 	}
 
+	// Fetch the node to verify ownership via its Ed25519 public key.
+	node, err := s.registry.GetByID(ctx, nodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "node not found: %v", err)
+	}
+
+	pubKeyBytes, err := hex.DecodeString(node.PublicKey)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return nil, status.Error(codes.Internal, "stored public key corrupt")
+	}
+	msg := canonicalDeregisterMessage(req.NodeId, req.Reason, req.Timestamp)
+	if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), msg, req.Signature) {
+		return nil, status.Error(codes.PermissionDenied, "invalid signature")
+	}
+
 	if err := s.registry.UpdateStatus(ctx, nodeID, registry.StatusSuspended); err != nil {
 		return nil, status.Errorf(codes.Internal, "deregistering node: %v", err)
 	}
 
-	s.log.Info("node deregistered", zap.String("node_id", req.NodeId), zap.String("reason", req.Reason))
+	s.log.Info("node voluntarily deregistered",
+		zap.String("node_id", req.NodeId),
+		zap.String("reason", req.Reason),
+	)
 	return &coordinatorv1.DeregisterNodeResponse{Success: true, Message: "node deregistered"}, nil
 }
 
@@ -477,10 +508,57 @@ func verifyTaskResultSig(pubKeyHex, taskID string, outputHash, sig []byte) error
 	return nil
 }
 
+// checkRegistrationRateLimit enforces SRS-SEC-04: max 10 new node registrations
+// per source IP per hour. Uses Redis when available; skips silently if Redis is nil.
+func (s *Server) checkRegistrationRateLimit(ctx context.Context) error {
+	if s.rdb == nil {
+		return nil
+	}
+	clientIP := extractClientIP(ctx)
+	if clientIP == "" {
+		return nil
+	}
+	key := "owm:reg-rate:" + clientIP
+	count, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		s.log.Warn("rate-limit redis error (allowing)", zap.String("ip", clientIP), zap.Error(err))
+		return nil
+	}
+	if count == 1 {
+		// First increment: set the 1-hour sliding window TTL.
+		_ = s.rdb.Expire(ctx, key, time.Hour).Err()
+	}
+	const maxPerHour = 10
+	if count > maxPerHour {
+		metrics.OwmRegistrationRateLimitedTotal.WithLabelValues(clientIP).Inc()
+		return status.Errorf(codes.ResourceExhausted,
+			"registration rate limit exceeded: max %d new nodes per IP per hour", maxPerHour)
+	}
+	return nil
+}
+
+// extractClientIP returns the source IP from the gRPC peer context, or "".
+func extractClientIP(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		return p.Addr.String() // fallback: use raw addr
+	}
+	return host
+}
+
 // canonicalTaskResultMessage constructs the deterministic byte string that a node
 // must sign when submitting a task result.
 func canonicalTaskResultMessage(taskID, outputHashHex string) []byte {
 	return []byte(fmt.Sprintf("owm-task-result|%s|%s", taskID, outputHashHex))
+}
+
+// canonicalDeregisterMessage builds the signed message for voluntary exit (SRS-STAKE-08).
+func canonicalDeregisterMessage(nodeID, reason string, ts int64) []byte {
+	return []byte(fmt.Sprintf("owm-deregister|%s|%s|%d", nodeID, reason, ts))
 }
 
 // stakeMinSats returns the minimum stake in satoshis for a given tier string.

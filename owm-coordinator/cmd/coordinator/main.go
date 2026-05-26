@@ -285,6 +285,8 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("GET /internal/pool/nodes/{pubkey}/status", poolhttp.HandleGetNodeStatus(db, log))
+	mux.HandleFunc("GET /v1/network/slashing-log", poolhttp.HandleGetSlashingLog(db, log))
+	mux.HandleFunc("GET /v1/payments/history", poolhttp.HandleGetPaymentsHistory(db, log))
 	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -335,9 +337,25 @@ func run() error {
 		}
 	})
 
+	go runTicker(bgCtx, log, "dispatch-pending", 30*time.Second, func(ctx context.Context) {
+		n, err := sched.DispatchPending(ctx)
+		if err != nil {
+			log.Error("dispatch pending tasks", zap.Error(err))
+		} else if n > 0 {
+			log.Info("pending tasks dispatched", zap.Int("count", n))
+		}
+	})
+
 	go runTicker(bgCtx, log, "stake-reverify", 6*time.Hour, func(ctx context.Context) {
 		if err := verif.VerifyAllActive(ctx); err != nil {
 			log.Error("periodic stake reverification", zap.Error(err))
+		}
+	})
+
+	go runTicker(bgCtx, log, "degraded-grace-enforce", time.Hour, func(ctx context.Context) {
+		gracePeriod := time.Duration(cfg.Stake.DegradedGracePeriodHours) * time.Hour
+		if err := verif.EnforceDegradedGrace(ctx, gracePeriod); err != nil {
+			log.Error("degraded grace period enforcement", zap.Error(err))
 		}
 	})
 
