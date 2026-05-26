@@ -239,3 +239,59 @@ func TestDeregisterNode_InvalidSignature(t *testing.T) {
 		t.Fatal("expected error for invalid signature, got nil")
 	}
 }
+
+// TestRegisterNode_CooldownBlocked verifies SRS-STAKE-07: a slashed node whose
+// cooldown has not yet expired is rejected with PERMISSION_DENIED.
+func TestRegisterNode_CooldownBlocked(t *testing.T) {
+	lnMock := mock.New()
+	srv, _ := buildServer(t, lnMock)
+
+	ctx := context.Background()
+	nf := testutil.NewNodeFixture(t)
+
+	// First: register and activate so the node exists in the DB.
+	lnMock.SetChannels(nf.PubKeyHex, []lightning.Channel{{
+		ChannelID:        "ch-cooldown",
+		RemotePubkey:     nf.PubKeyHex,
+		CapacitySats:     150_000,
+		LocalBalanceSats: 150_000,
+		Active:           true,
+	}})
+	ts := time.Now().Unix()
+	regResp, err := srv.RegisterNode(ctx, &coordinatorv1.RegisterNodeRequest{
+		PublicKey:    nf.PubKeyHex,
+		LnNodeUri:    nf.LNNodeURI,
+		Timestamp:    ts,
+		Signature:    nf.Sign(nf.LNNodeURI, "t1", ts),
+		Capabilities: &coordinatorv1.NodeCapabilities{Tier: "t1", VramGb: 8, RamGb: 16},
+	})
+	if err != nil || regResp.Status != "active" {
+		t.Fatalf("initial registration: err=%v status=%q", err, regResp.GetStatus())
+	}
+
+	// Insert a slashing event with a future cooldown expiry directly into DB.
+	pool := testutil.MustDB(t)
+	nodeID := regResp.NodeId
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO slashing_events
+		    (node_id, channel_id, tier, reason, evidence_hash, signal_count, cooldown_expires_at, coordinator_sig)
+		 VALUES ($1::uuid, 'ch-cooldown', 't1', 'test', 'evidence', 3, now() + interval '30 days', 'pending')`,
+		nodeID,
+	); err != nil {
+		t.Fatalf("insert slashing event: %v", err)
+	}
+
+	// Attempt re-registration — must be rejected.
+	ts2 := time.Now().Unix()
+	_, err = srv.RegisterNode(ctx, &coordinatorv1.RegisterNodeRequest{
+		PublicKey:    nf.PubKeyHex,
+		LnNodeUri:    nf.LNNodeURI,
+		Timestamp:    ts2,
+		Signature:    nf.Sign(nf.LNNodeURI, "t1", ts2),
+		Capabilities: &coordinatorv1.NodeCapabilities{Tier: "t1", VramGb: 8, RamGb: 16},
+	})
+	if err == nil {
+		t.Fatal("expected error for node in cooldown, got nil")
+	}
+	t.Logf("correctly rejected with: %v", err)
+}

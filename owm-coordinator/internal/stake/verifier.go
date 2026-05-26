@@ -6,10 +6,13 @@ package stake
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -349,6 +352,87 @@ func (v *Verifier) EnforceDegradedGrace(ctx context.Context, gracePeriod time.Du
 			zap.String("node_id", nodeID.String()), zap.String("tier", tier))
 	}
 	return rows.Err()
+}
+
+// CheckCooldown returns a non-nil error if the node identified by pubKeyHex is
+// still within its post-slash re-stake cooldown period (SRS-STAKE-07).
+// A fresh or never-slashed node returns nil.
+func (v *Verifier) CheckCooldown(ctx context.Context, pubKeyHex string) error {
+	var cooldownExpires time.Time
+	err := v.db.QueryRow(ctx,
+		`SELECT se.cooldown_expires_at
+		 FROM slashing_events se
+		 JOIN nodes n ON n.node_id = se.node_id
+		 WHERE n.public_key = $1
+		   AND se.cooldown_expires_at > now()
+		 ORDER BY se.cooldown_expires_at DESC
+		 LIMIT 1`,
+		pubKeyHex,
+	).Scan(&cooldownExpires)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking cooldown: %w", err)
+	}
+	return fmt.Errorf("STAKE_COOLDOWN: node is in re-stake cooldown until %s",
+		cooldownExpires.UTC().Format(time.RFC3339))
+}
+
+// RecordMaintainerAck records a signed core-maintainer acknowledgment for a
+// pending T2/T3 slash decision (SRS-SEC-14). When the number of distinct
+// maintainer acks for the node reaches slashCfg.T2T3MaintainerAcks, slashing
+// is automatically triggered.
+//
+// maintainerPubKey and signature are hex-encoded. The signature must cover the
+// canonical message: "owm-slash-ack|<node_id>|<reason_hash>" using the
+// maintainer's Ed25519 identity key.
+func (v *Verifier) RecordMaintainerAck(ctx context.Context, nodeID uuid.UUID, tier, maintainerPubKey, maintainerSig, reasonHash string) error {
+	pubKeyBytes, err := hex.DecodeString(maintainerPubKey)
+	if err != nil {
+		return fmt.Errorf("invalid maintainer_pubkey: %w", err)
+	}
+	if len(pubKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid maintainer_pubkey length: got %d, want %d", len(pubKeyBytes), ed25519.PublicKeySize)
+	}
+	sigBytes, err := hex.DecodeString(maintainerSig)
+	if err != nil {
+		return fmt.Errorf("invalid signature: %w", err)
+	}
+	msg := []byte("owm-slash-ack|" + nodeID.String() + "|" + reasonHash)
+	if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), msg, sigBytes) {
+		return fmt.Errorf("invalid maintainer signature")
+	}
+
+	// Upsert the ack; UNIQUE(node_id, maintainer_key) prevents duplicate acks.
+	_, err = v.db.Exec(ctx,
+		`INSERT INTO maintainer_acks (node_id, maintainer_key, signature, reason_hash)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (node_id, maintainer_key) DO NOTHING`,
+		nodeID, maintainerPubKey, maintainerSig, reasonHash,
+	)
+	if err != nil {
+		return fmt.Errorf("recording maintainer ack: %w", err)
+	}
+
+	var ackCount int
+	if err := v.db.QueryRow(ctx,
+		`SELECT count(*) FROM maintainer_acks WHERE node_id = $1`, nodeID,
+	).Scan(&ackCount); err != nil {
+		return fmt.Errorf("counting acks: %w", err)
+	}
+
+	v.log.Info("maintainer ack recorded",
+		zap.String("node_id", nodeID.String()),
+		zap.String("maintainer", maintainerPubKey[:8]+"…"),
+		zap.Int("ack_count", ackCount),
+		zap.Int("threshold", v.slashCfg.T2T3MaintainerAcks),
+	)
+
+	if v.slashCfg.T2T3MaintainerAcks > 0 && ackCount >= v.slashCfg.T2T3MaintainerAcks {
+		return v.Slash(ctx, nodeID, tier, "maintainer_ack_threshold", reasonHash, ackCount)
+	}
+	return nil
 }
 
 // computeBonus implements the stake bonus formula from SRS-4.4.2:

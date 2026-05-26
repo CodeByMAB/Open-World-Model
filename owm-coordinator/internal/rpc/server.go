@@ -87,8 +87,13 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 		return nil, status.Error(codes.InvalidArgument, "public_key, ln_node_uri, and capabilities are required")
 	}
 
+	// Reject nodes still within their post-slash cooldown (SRS-STAKE-07).
+	if err := s.verifier.CheckCooldown(ctx, req.PublicKey); err != nil {
+		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
+	}
+
 	// Rate-limit new registrations per source IP (SRS-SEC-04: max 10 per hour).
-	if err := s.checkRegistrationRateLimit(ctx); err != nil {
+	if err := s.checkRegistrationRateLimit(ctx, req.PublicKey); err != nil {
 		return nil, err
 	}
 
@@ -509,23 +514,29 @@ func verifyTaskResultSig(pubKeyHex, taskID string, outputHash, sig []byte) error
 }
 
 // checkRegistrationRateLimit enforces SRS-SEC-04: max 10 new node registrations
-// per source IP per hour. Uses Redis when available; skips silently if Redis is nil.
-func (s *Server) checkRegistrationRateLimit(ctx context.Context) error {
+// per source IP per hour. For Tor connections (loopback source IP), rate-limiting
+// is applied per node public key instead of per IP (SRS-NET-07).
+// Uses Redis when available; skips silently if Redis is nil.
+func (s *Server) checkRegistrationRateLimit(ctx context.Context, pubKeyHex string) error {
 	if s.rdb == nil {
 		return nil
 	}
 	clientIP := extractClientIP(ctx)
-	if clientIP == "" {
-		return nil
+
+	var key string
+	// SRS-NET-07: Tor connections appear as loopback; fall back to pubkey-scoped key.
+	if clientIP == "127.0.0.1" || clientIP == "::1" || clientIP == "" {
+		key = "owm:reg-rate-pk:" + pubKeyHex
+	} else {
+		key = "owm:reg-rate:" + clientIP
 	}
-	key := "owm:reg-rate:" + clientIP
+
 	count, err := s.rdb.Incr(ctx, key).Result()
 	if err != nil {
 		s.log.Warn("rate-limit redis error (allowing)", zap.String("ip", clientIP), zap.Error(err))
 		return nil
 	}
 	if count == 1 {
-		// First increment: set the 1-hour sliding window TTL.
 		_ = s.rdb.Expire(ctx, key, time.Hour).Err()
 	}
 	const maxPerHour = 10

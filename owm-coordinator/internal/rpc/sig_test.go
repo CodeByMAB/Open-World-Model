@@ -203,7 +203,7 @@ func TestExtractClientIP_NoContext(t *testing.T) {
 func TestCheckRegistrationRateLimit_NilRedis(t *testing.T) {
 	// When rdb is nil, rate limiting is disabled; must return nil (no error).
 	s := &Server{rdb: nil}
-	err := s.checkRegistrationRateLimit(context.Background())
+	err := s.checkRegistrationRateLimit(context.Background(), "deadbeef")
 	if err != nil {
 		t.Errorf("expected nil with no Redis, got %v", err)
 	}

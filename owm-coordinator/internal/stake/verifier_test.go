@@ -2,6 +2,10 @@ package stake
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -423,5 +427,238 @@ func TestEnforceDegradedGrace_SkipsFreshDegraded(t *testing.T) {
 	}
 	if status != "degraded" {
 		t.Errorf("status: got %q, want degraded (should not be suspended yet)", status)
+	}
+}
+
+// insertSlashedNode is a helper that inserts a node, its stake record, and a
+// slashing event with a configurable cooldown_expires_at, then returns the node_id
+// and public_key.
+func insertSlashedNode(t *testing.T, pool *pgxpool.Pool, cooldownExpires time.Time) (uuid.UUID, string) {
+	t.Helper()
+	ctx := context.Background()
+	nodeID := uuid.New()
+	pubKey := "pk-cooldown-" + nodeID.String()[:8]
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, status)
+		 VALUES ($1, $2, $3, 't1', 'suspended')`,
+		nodeID, pubKey, pubKey+"@127.0.0.1:9735",
+	); err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO node_stakes
+		    (node_id, channel_id, channel_capacity, local_balance, tier_minimum, stake_status)
+		 VALUES ($1, 'ch-cooldown', 200000, 0, 100000, 'force_closed')`,
+		nodeID,
+	); err != nil {
+		t.Fatalf("insert node_stakes: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO slashing_events
+		    (node_id, channel_id, tier, reason, evidence_hash, signal_count, cooldown_expires_at, coordinator_sig)
+		 VALUES ($1, 'ch-cooldown', 't1', 'test', 'evidence', 3, $2, 'pending')`,
+		nodeID, cooldownExpires,
+	); err != nil {
+		t.Fatalf("insert slashing_event: %v", err)
+	}
+	return nodeID, pubKey
+}
+
+// TestCheckCooldown_NotSlashed verifies a never-slashed node returns nil.
+func TestCheckCooldown_NotSlashed(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	nodeID := uuid.New()
+	pubKey := "pk-no-slash-" + nodeID.String()[:8]
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, status)
+		 VALUES ($1, $2, $3, 't1', 'active')`,
+		nodeID, pubKey, pubKey+"@127.0.0.1:9735",
+	)
+	if err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+
+	v := New(pool, nil, nil, SlashConfig{}, zap.NewNop())
+	if err := v.CheckCooldown(context.Background(), pubKey); err != nil {
+		t.Errorf("expected nil for non-slashed node, got: %v", err)
+	}
+}
+
+// TestCheckCooldown_ActiveCooldown verifies a recently-slashed node is blocked.
+func TestCheckCooldown_ActiveCooldown(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	_, pubKey := insertSlashedNode(t, pool, time.Now().Add(30*24*time.Hour))
+	v := New(pool, nil, nil, SlashConfig{}, zap.NewNop())
+	err := v.CheckCooldown(context.Background(), pubKey)
+	if err == nil {
+		t.Fatal("expected error for node in active cooldown, got nil")
+	}
+	if !strings.Contains(err.Error(), "STAKE_COOLDOWN") {
+		t.Errorf("expected STAKE_COOLDOWN in error, got: %v", err)
+	}
+}
+
+// TestCheckCooldown_ExpiredCooldown verifies a node whose cooldown has passed is allowed.
+func TestCheckCooldown_ExpiredCooldown(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	_, pubKey := insertSlashedNode(t, pool, time.Now().Add(-time.Hour))
+	v := New(pool, nil, nil, SlashConfig{}, zap.NewNop())
+	if err := v.CheckCooldown(context.Background(), pubKey); err != nil {
+		t.Errorf("expected nil for expired cooldown, got: %v", err)
+	}
+}
+
+// TestRecordMaintainerAck_BelowThreshold verifies a single ack for a T2 node
+// (threshold=2) records but does not trigger slashing.
+func TestRecordMaintainerAck_BelowThreshold(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	nodeID := uuid.New()
+	pubKey := "pk-ack-t2-" + nodeID.String()[:8]
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, status)
+		 VALUES ($1, $2, $3, 't2', 'active')`,
+		nodeID, pubKey, pubKey+"@127.0.0.1:9735",
+	); err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+
+	lnMock := mock.New()
+	cfg := SlashConfig{T2T3MaintainerAcks: 2, CooldownDuration: 30 * 24 * time.Hour}
+	v := New(pool, lnMock, lnMock, cfg, zap.NewNop())
+
+	maintPub, maintPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	reasonHash := "deadbeef"
+	msg := []byte("owm-slash-ack|" + nodeID.String() + "|" + reasonHash)
+	sig := ed25519.Sign(maintPriv, msg)
+
+	if err := v.RecordMaintainerAck(ctx, nodeID, "t2",
+		hex.EncodeToString(maintPub), hex.EncodeToString(sig), reasonHash); err != nil {
+		t.Fatalf("RecordMaintainerAck: %v", err)
+	}
+
+	// Node should still be active — threshold not yet reached.
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM nodes WHERE node_id = $1`, nodeID,
+	).Scan(&status); err != nil {
+		t.Fatalf("fetching status: %v", err)
+	}
+	if status != "active" {
+		t.Errorf("status: got %q, want active (ack below threshold)", status)
+	}
+}
+
+// TestRecordMaintainerAck_TriggersSlash verifies that hitting the ack threshold
+// automatically triggers slashing (SRS-SEC-14).
+func TestRecordMaintainerAck_TriggersSlash(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	nodeID := uuid.New()
+	pubKey := "pk-ack-slash-" + nodeID.String()[:8]
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, status)
+		 VALUES ($1, $2, $3, 't2', 'active')`,
+		nodeID, pubKey, pubKey+"@127.0.0.1:9735",
+	); err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO node_stakes
+		    (node_id, channel_id, channel_capacity, local_balance, tier_minimum, stake_status)
+		 VALUES ($1, 'ch-ack-slash', 600000, 600000, 500000, 'active')`,
+		nodeID,
+	); err != nil {
+		t.Fatalf("insert node_stakes: %v", err)
+	}
+
+	lnMock := mock.New()
+	cfg := SlashConfig{T2T3MaintainerAcks: 2, CooldownDuration: 30 * 24 * time.Hour}
+	v := New(pool, lnMock, lnMock, cfg, zap.NewNop())
+
+	reasonHash := "cafebabe"
+
+	sendAck := func(t *testing.T) {
+		t.Helper()
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("keygen: %v", err)
+		}
+		msg := []byte("owm-slash-ack|" + nodeID.String() + "|" + reasonHash)
+		sig := ed25519.Sign(priv, msg)
+		if err := v.RecordMaintainerAck(ctx, nodeID, "t2",
+			hex.EncodeToString(pub), hex.EncodeToString(sig), reasonHash); err != nil {
+			t.Fatalf("RecordMaintainerAck: %v", err)
+		}
+	}
+
+	sendAck(t) // ack 1 — below threshold
+	sendAck(t) // ack 2 — hits threshold, triggers slash
+
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM nodes WHERE node_id = $1`, nodeID,
+	).Scan(&status); err != nil {
+		t.Fatalf("fetching status: %v", err)
+	}
+	if status != "suspended" {
+		t.Errorf("status: got %q, want suspended (slash should have been triggered)", status)
+	}
+
+	var slashCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM slashing_events WHERE node_id = $1`, nodeID,
+	).Scan(&slashCount); err != nil {
+		t.Fatalf("fetching slash events: %v", err)
+	}
+	if slashCount != 1 {
+		t.Errorf("slashing_events: got %d, want 1", slashCount)
+	}
+}
+
+// TestRecordMaintainerAck_InvalidSignature verifies that a bad signature is rejected.
+func TestRecordMaintainerAck_InvalidSignature(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	nodeID := uuid.New()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO nodes (node_id, public_key, ln_node_uri, tier, status)
+		 VALUES ($1, $2, $3, 't2', 'active')`,
+		nodeID, "pk-badsig-"+nodeID.String()[:8], nodeID.String()+"@127.0.0.1:9735",
+	); err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+
+	lnMock := mock.New()
+	v := New(pool, lnMock, lnMock, SlashConfig{T2T3MaintainerAcks: 2}, zap.NewNop())
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	badSig := make([]byte, ed25519.SignatureSize)
+
+	err = v.RecordMaintainerAck(ctx, nodeID, "t2",
+		hex.EncodeToString(pub), hex.EncodeToString(badSig), "deadbeef")
+	if err == nil {
+		t.Fatal("expected error for invalid signature, got nil")
 	}
 }
