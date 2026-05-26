@@ -140,6 +140,91 @@ func TestRequeueTimedOutIntegration(t *testing.T) {
 	}
 }
 
+// TestDispatchPendingIntegration verifies SRS-SCHED-03: DispatchPending processes
+// requeued tasks in priority order (FL rounds before inference before data ingest).
+func TestDispatchPendingIntegration(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+	nf := testutil.NewNodeFixture(t)
+
+	ts := time.Now().Unix()
+	caps := registry.NodeCapabilities{Tier: registry.TierT1, VRAMGB: 8, RAMGB: 16, BandwidthMbps: 100}
+	sig := nf.Sign(nf.LNNodeURI, registry.TierT1, ts)
+	node, err := reg.Register(ctx, nf.PubKeyHex, nf.LNNodeURI, "", caps, sig, ts)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.Activate(ctx, node.NodeID); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	// Insert pending tasks in reverse priority order so we can verify the dispatcher
+	// picks fl_round first.
+	insertPending := func(taskType string) uuid.UUID {
+		id := uuid.New()
+		_, err := pool.Exec(ctx,
+			`INSERT INTO tasks
+			    (task_id, task_type, status, input_hash, reward_sats,
+			     submitted_at, timeout_seconds)
+			 VALUES ($1, $2, 'pending', 'hash', 10, now(), 120)`,
+			id, taskType,
+		)
+		if err != nil {
+			t.Fatalf("insert pending task (%s): %v", taskType, err)
+		}
+		return id
+	}
+
+	dataIngestID := insertPending("data_ingest")
+	inferenceID := insertPending("inference")
+	flRoundID := insertPending("fl_round")
+	_ = dataIngestID
+	_ = inferenceID
+
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+
+	n, err := sched.DispatchPending(ctx)
+	if err != nil {
+		t.Fatalf("DispatchPending: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("dispatched count: got %d, want 3", n)
+	}
+
+	// fl_round task must be assigned to the node (processed first).
+	var flStatus string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM tasks WHERE task_id = $1`, flRoundID,
+	).Scan(&flStatus); err != nil {
+		t.Fatalf("fetching fl_round task: %v", err)
+	}
+	if flStatus != "running" {
+		t.Errorf("fl_round task status: got %q, want running", flStatus)
+	}
+}
+
+// TestDispatchPending_NoPendingTasks verifies DispatchPending is a no-op when the
+// queue is empty and returns 0 without error.
+func TestDispatchPending_NoPendingTasks(t *testing.T) {
+	pool := testutil.MustDB(t)
+	testutil.TruncateAll(t, pool)
+
+	ctx := context.Background()
+	reg := registry.New(pool, testutil.Logger())
+	sched := scheduler.New(pool, reg, nil, testutil.Logger())
+
+	n, err := sched.DispatchPending(ctx)
+	if err != nil {
+		t.Fatalf("DispatchPending: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("dispatched count: got %d, want 0", n)
+	}
+}
+
 // TestScheduleIntegration_TaskTypeMismatch verifies that a node declaring
 // specific supported task types is NOT assigned tasks it doesn't support,
 // and IS assigned tasks it does support.

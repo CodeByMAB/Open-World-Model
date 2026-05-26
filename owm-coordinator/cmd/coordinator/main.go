@@ -335,6 +335,15 @@ func run() error {
 		}
 	})
 
+	go runTicker(bgCtx, log, "dispatch-pending", 30*time.Second, func(ctx context.Context) {
+		n, err := sched.DispatchPending(ctx)
+		if err != nil {
+			log.Error("dispatch pending tasks", zap.Error(err))
+		} else if n > 0 {
+			log.Info("pending tasks dispatched", zap.Int("count", n))
+		}
+	})
+
 	go runTicker(bgCtx, log, "stake-reverify", 6*time.Hour, func(ctx context.Context) {
 		if err := verif.VerifyAllActive(ctx); err != nil {
 			log.Error("periodic stake reverification", zap.Error(err))

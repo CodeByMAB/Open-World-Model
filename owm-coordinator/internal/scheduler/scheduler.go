@@ -246,6 +246,107 @@ func (s *Scheduler) computeReward(ctx context.Context, node *registry.Node, task
 	return int64(reward)
 }
 
+// DispatchPending picks up unassigned pending tasks from the database in priority
+// order (FL rounds first, then inference, then data ingest — SRS-SCHED-03) and
+// assigns each to the best eligible node. Returns the number of tasks dispatched.
+// This handles tasks requeued after timeout and any that could not be immediately
+// assigned at submission time.
+func (s *Scheduler) DispatchPending(ctx context.Context) (int, error) {
+	const q = `
+		SELECT task_id, task_type, input_hash, timeout_seconds
+		FROM tasks
+		WHERE status = 'pending' AND assigned_node IS NULL
+		ORDER BY
+		  CASE task_type
+		    WHEN 'fl_round'     THEN 1
+		    WHEN 'gradient_agg' THEN 1
+		    WHEN 'inference'    THEN 2
+		    WHEN 'audit_repo'   THEN 2
+		    WHEN 'embed_data'   THEN 3
+		    WHEN 'data_ingest'  THEN 3
+		    ELSE 4
+		  END,
+		  submitted_at ASC
+		LIMIT 50`
+
+	rows, err := s.db.Query(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	// Fetch active nodes once per dispatch cycle (avoids N DB round-trips).
+	nodes, err := s.registry.ListActive(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("listing active nodes: %w", err)
+	}
+
+	dispatched := 0
+	for rows.Next() {
+		var (
+			taskID      uuid.UUID
+			taskTypeStr string
+			inputHash   string
+			timeoutSecs int
+		)
+		if err := rows.Scan(&taskID, &taskTypeStr, &inputHash, &timeoutSecs); err != nil {
+			s.log.Error("scanning pending task", zap.Error(err))
+			continue
+		}
+		taskType := TaskType(taskTypeStr)
+
+		minTier := taskMinTier[taskType]
+		eligible := s.filterEligible(ctx, nodes, taskType, minTier)
+		if len(eligible) == 0 {
+			continue
+		}
+
+		node := s.selectNode(eligible)
+		rewardSats := s.computeReward(ctx, node, taskType)
+
+		// Atomically claim: only succeeds if the task is still unassigned.
+		res, err := s.db.Exec(ctx,
+			`UPDATE tasks
+			 SET status = 'running', assigned_node = $2, node_ln_uri = $3,
+			     reward_sats = $4, started_at = now()
+			 WHERE task_id = $1 AND status = 'pending' AND assigned_node IS NULL`,
+			taskID, node.NodeID, node.LNNodeURI, rewardSats,
+		)
+		if err != nil {
+			s.log.Warn("claiming pending task", zap.String("task_id", taskID.String()), zap.Error(err))
+			continue
+		}
+		if res.RowsAffected() == 0 {
+			continue // already claimed concurrently
+		}
+
+		dispatched++
+		metrics.OwmTasksTotal.WithLabelValues(string(taskType), "running").Inc()
+
+		if s.rdb != nil {
+			a := Assignment{
+				TaskID: taskID, NodeID: node.NodeID, NodeLNURI: node.LNNodeURI,
+				TaskType: taskType, RewardSats: rewardSats, TimeoutSecs: timeoutSecs,
+				AssignedAt: time.Now().UTC(),
+			}
+			jsonBytes, _ := json.Marshal(a)
+			if err := s.rdb.Publish(ctx, "owm:tasks:"+node.NodeID.String(), jsonBytes).Err(); err != nil {
+				s.log.Warn("redis publish pending dispatch", zap.String("task_id", taskID.String()), zap.Error(err))
+			}
+		}
+
+		s.log.Info("pending task dispatched",
+			zap.String("task_id", taskID.String()),
+			zap.String("node_id", node.NodeID.String()),
+			zap.String("task_type", string(taskType)),
+		)
+	}
+	if err := rows.Err(); err != nil {
+		return dispatched, err
+	}
+	return dispatched, nil
+}
+
 func (s *Scheduler) persistAssignment(ctx context.Context, a *Assignment, inputHash string) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO tasks

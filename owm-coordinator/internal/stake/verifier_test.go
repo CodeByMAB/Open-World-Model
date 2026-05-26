@@ -263,7 +263,7 @@ func TestVerifyAllActive_MarksNodeDegraded(t *testing.T) {
 }
 
 // TestVerifyAllActive_PassingNodeRefreshed verifies that a node with sufficient stake
-// stays active and has its bonus_multiplier refreshed.
+// stays active and has its bonus_multiplier refreshed (SRS-STAKE-10).
 func TestVerifyAllActive_PassingNodeRefreshed(t *testing.T) {
 	pool := testutil.MustDB(t)
 	testutil.TruncateAll(t, pool)
@@ -283,17 +283,20 @@ func TestVerifyAllActive_PassingNodeRefreshed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert node: %v", err)
 	}
+	// Initial stake at exactly tier minimum → bonus_multiplier = 1.0.
 	_, err = pool.Exec(ctx,
 		`INSERT INTO node_stakes
-		    (node_id, channel_id, channel_capacity, local_balance, tier_minimum, stake_status)
-		 VALUES ($1, 'ch-pass', 200000, 200000, 100000, 'active')`,
+		    (node_id, channel_id, channel_capacity, local_balance, tier_minimum,
+		     stake_status, bonus_multiplier)
+		 VALUES ($1, 'ch-pass', 100000, 100000, 100000, 'active', 1.0)`,
 		nodeID,
 	)
 	if err != nil {
 		t.Fatalf("insert node_stakes: %v", err)
 	}
 
-	// Mock returns a channel with 200k sats (above t1 minimum of 100k).
+	// Channel capacity has grown to 200k (double the minimum) → bonus should become 1.5.
+	// computeBonus(200k, 100k) = 1.0 + (100k/100k)*0.5 = 1.5
 	lnMock.SetChannels(pubKey, []lightning.Channel{{
 		ChannelID:        "ch-pass",
 		RemotePubkey:     pubKey,
@@ -306,24 +309,30 @@ func TestVerifyAllActive_PassingNodeRefreshed(t *testing.T) {
 		t.Fatalf("VerifyAllActive: %v", err)
 	}
 
-	var status string
+	var nodeStatus string
 	if err := pool.QueryRow(ctx,
 		`SELECT status FROM nodes WHERE node_id = $1`, nodeID,
-	).Scan(&status); err != nil {
+	).Scan(&nodeStatus); err != nil {
 		t.Fatalf("fetching node status: %v", err)
 	}
-	if status != "active" {
-		t.Errorf("status: got %q, want active", status)
+	if nodeStatus != "active" {
+		t.Errorf("status: got %q, want active", nodeStatus)
 	}
 
 	var stakeStatus string
+	var bonusMult float64
 	if err := pool.QueryRow(ctx,
-		`SELECT stake_status FROM node_stakes WHERE node_id = $1`, nodeID,
-	).Scan(&stakeStatus); err != nil {
-		t.Fatalf("fetching stake_status: %v", err)
+		`SELECT stake_status, bonus_multiplier FROM node_stakes WHERE node_id = $1`, nodeID,
+	).Scan(&stakeStatus, &bonusMult); err != nil {
+		t.Fatalf("fetching node_stakes: %v", err)
 	}
 	if stakeStatus != "active" {
 		t.Errorf("stake_status: got %q, want active", stakeStatus)
+	}
+	// bonus_multiplier should have been updated to 1.5 (SRS-STAKE-10).
+	const wantBonus = 1.5
+	if bonusMult != wantBonus {
+		t.Errorf("bonus_multiplier: got %f, want %f", bonusMult, wantBonus)
 	}
 }
 

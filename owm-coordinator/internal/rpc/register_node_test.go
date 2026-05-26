@@ -2,6 +2,8 @@ package rpc_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"fmt"
 	"testing"
 	"time"
 
@@ -147,5 +149,93 @@ func TestRegisterNode_SubMinimumStake(t *testing.T) {
 	}
 	if resp.ErrorCode != "INSUFFICIENT_STAKE" {
 		t.Errorf("error_code: got %q, want INSUFFICIENT_STAKE", resp.ErrorCode)
+	}
+}
+
+// TestDeregisterNode_ValidSignature verifies SRS-STAKE-08: a node can voluntarily
+// deregister when it provides a valid Ed25519 signature over the canonical message.
+func TestDeregisterNode_ValidSignature(t *testing.T) {
+	lnMock := mock.New()
+	srv, _ := buildServer(t, lnMock)
+
+	ctx := context.Background()
+	nf := testutil.NewNodeFixture(t)
+
+	lnMock.SetChannels(nf.PubKeyHex, []lightning.Channel{{
+		ChannelID:        "ch-dereg",
+		RemotePubkey:     nf.PubKeyHex,
+		CapacitySats:     150_000,
+		LocalBalanceSats: 150_000,
+		Active:           true,
+	}})
+	ts := time.Now().Unix()
+	regResp, err := srv.RegisterNode(ctx, &coordinatorv1.RegisterNodeRequest{
+		PublicKey:    nf.PubKeyHex,
+		LnNodeUri:    nf.LNNodeURI,
+		Timestamp:    ts,
+		Signature:    nf.Sign(nf.LNNodeURI, "t1", ts),
+		Capabilities: &coordinatorv1.NodeCapabilities{Tier: "t1", VramGb: 8, RamGb: 16},
+	})
+	if err != nil || regResp.Status != "active" {
+		t.Fatalf("RegisterNode: err=%v status=%q", err, regResp.GetStatus())
+	}
+	nodeID := regResp.NodeId
+
+	deregTs := time.Now().Unix()
+	reason := "shutdown"
+	msg := []byte(fmt.Sprintf("owm-deregister|%s|%s|%d", nodeID, reason, deregTs))
+	sig := ed25519.Sign(nf.PrivKey, msg)
+
+	resp, err := srv.DeregisterNode(ctx, &coordinatorv1.DeregisterNodeRequest{
+		NodeId:    nodeID,
+		Timestamp: deregTs,
+		Reason:    reason,
+		Signature: sig,
+	})
+	if err != nil {
+		t.Fatalf("DeregisterNode: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("expected Success=true, got false: %s", resp.Message)
+	}
+}
+
+// TestDeregisterNode_InvalidSignature verifies that a deregistration with a bad
+// signature is rejected.
+func TestDeregisterNode_InvalidSignature(t *testing.T) {
+	lnMock := mock.New()
+	srv, _ := buildServer(t, lnMock)
+
+	ctx := context.Background()
+	nf := testutil.NewNodeFixture(t)
+
+	lnMock.SetChannels(nf.PubKeyHex, []lightning.Channel{{
+		ChannelID:        "ch-bad-sig",
+		RemotePubkey:     nf.PubKeyHex,
+		CapacitySats:     150_000,
+		LocalBalanceSats: 150_000,
+		Active:           true,
+	}})
+	ts := time.Now().Unix()
+	regResp, err := srv.RegisterNode(ctx, &coordinatorv1.RegisterNodeRequest{
+		PublicKey:    nf.PubKeyHex,
+		LnNodeUri:    nf.LNNodeURI,
+		Timestamp:    ts,
+		Signature:    nf.Sign(nf.LNNodeURI, "t1", ts),
+		Capabilities: &coordinatorv1.NodeCapabilities{Tier: "t1", VramGb: 8, RamGb: 16},
+	})
+	if err != nil || regResp.Status != "active" {
+		t.Fatalf("RegisterNode: err=%v status=%q", err, regResp.GetStatus())
+	}
+
+	deregTs := time.Now().Unix()
+	_, err = srv.DeregisterNode(ctx, &coordinatorv1.DeregisterNodeRequest{
+		NodeId:    regResp.NodeId,
+		Timestamp: deregTs,
+		Reason:    "shutdown",
+		Signature: []byte("not-a-real-signature"),
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid signature, got nil")
 	}
 }

@@ -199,6 +199,26 @@ func (r *Registry) RecordHeartbeat(ctx context.Context, nodeID uuid.UUID) (pendi
 	return pendingTasks, err
 }
 
+// GetByID retrieves a node by its UUID.
+func (r *Registry) GetByID(ctx context.Context, nodeID uuid.UUID) (*Node, error) {
+	const q = `
+		SELECT node_id, public_key, ln_node_uri, COALESCE(onion_address, ''), tier, vram_gb, ram_gb,
+		       bandwidth_mbps, supported_task_types, reliability, total_tasks, total_sats,
+		       status, registered_at, last_heartbeat
+		FROM nodes WHERE node_id = $1`
+
+	var n Node
+	err := r.db.QueryRow(ctx, q, nodeID).Scan(
+		&n.NodeID, &n.PublicKey, &n.LNNodeURI, &n.OnionAddress, &n.Tier,
+		&n.VRAMGB, &n.RAMGB, &n.BandwidthMbps, &n.SupportedTaskTypes, &n.Reliability,
+		&n.TotalTasks, &n.TotalSats, &n.Status, &n.RegisteredAt, &n.LastHeartbeat,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("node not found: %w", err)
+	}
+	return &n, nil
+}
+
 // GetByPublicKey retrieves a node by its Ed25519 public key.
 func (r *Registry) GetByPublicKey(ctx context.Context, pubKeyHex string) (*Node, error) {
 	const q = `

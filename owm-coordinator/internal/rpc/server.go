@@ -156,7 +156,9 @@ func (s *Server) Heartbeat(ctx context.Context, req *coordinatorv1.HeartbeatRequ
 	}, nil
 }
 
-// DeregisterNode marks a node as deregistered.
+// DeregisterNode handles voluntary node exit (SRS-STAKE-08).
+// The request must be signed by the node's own Ed25519 key to prevent
+// unauthorised deregistration.
 func (s *Server) DeregisterNode(ctx context.Context, req *coordinatorv1.DeregisterNodeRequest) (*coordinatorv1.DeregisterNodeResponse, error) {
 	if err := validateTimestamp(req.Timestamp); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "timestamp: %v", err)
@@ -167,11 +169,29 @@ func (s *Server) DeregisterNode(ctx context.Context, req *coordinatorv1.Deregist
 		return nil, status.Errorf(codes.InvalidArgument, "invalid node_id: %v", err)
 	}
 
+	// Fetch the node to verify ownership via its Ed25519 public key.
+	node, err := s.registry.GetByID(ctx, nodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "node not found: %v", err)
+	}
+
+	pubKeyBytes, err := hex.DecodeString(node.PublicKey)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return nil, status.Error(codes.Internal, "stored public key corrupt")
+	}
+	msg := canonicalDeregisterMessage(req.NodeId, req.Reason, req.Timestamp)
+	if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), msg, req.Signature) {
+		return nil, status.Error(codes.PermissionDenied, "invalid signature")
+	}
+
 	if err := s.registry.UpdateStatus(ctx, nodeID, registry.StatusSuspended); err != nil {
 		return nil, status.Errorf(codes.Internal, "deregistering node: %v", err)
 	}
 
-	s.log.Info("node deregistered", zap.String("node_id", req.NodeId), zap.String("reason", req.Reason))
+	s.log.Info("node voluntarily deregistered",
+		zap.String("node_id", req.NodeId),
+		zap.String("reason", req.Reason),
+	)
 	return &coordinatorv1.DeregisterNodeResponse{Success: true, Message: "node deregistered"}, nil
 }
 
@@ -485,6 +505,11 @@ func verifyTaskResultSig(pubKeyHex, taskID string, outputHash, sig []byte) error
 // must sign when submitting a task result.
 func canonicalTaskResultMessage(taskID, outputHashHex string) []byte {
 	return []byte(fmt.Sprintf("owm-task-result|%s|%s", taskID, outputHashHex))
+}
+
+// canonicalDeregisterMessage builds the signed message for voluntary exit (SRS-STAKE-08).
+func canonicalDeregisterMessage(nodeID, reason string, ts int64) []byte {
+	return []byte(fmt.Sprintf("owm-deregister|%s|%s|%d", nodeID, reason, ts))
 }
 
 // stakeMinSats returns the minimum stake in satoshis for a given tier string.
