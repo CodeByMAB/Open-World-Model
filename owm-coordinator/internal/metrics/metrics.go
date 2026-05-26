@@ -50,6 +50,12 @@ var (
 		prometheus.CounterOpts{Name: "owm_observer_receipts_total", Help: "Observer Protocol receipt submissions by status"},
 		[]string{"status"},
 	)
+	// OwmRegistrationRateLimitedTotal counts registration attempts blocked by the per-IP
+	// rate limit (SRS-SEC-04: max 10 new nodes per IP per hour).
+	OwmRegistrationRateLimitedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "owm_registration_rate_limited_total", Help: "Registration attempts blocked by per-IP rate limit"},
+		[]string{"ip"},
+	)
 )
 
 func init() {
@@ -63,5 +69,6 @@ func init() {
 		OwmStakeVerificationsTotal,
 		OwmSlashEventsTotal,
 		OwmObserverReceiptsTotal,
+		OwmRegistrationRateLimitedTotal,
 	)
 }

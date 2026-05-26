@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	coordinatorv1 "github.com/owmnetwork/owm-coordinator/proto/coordinator/v1"
@@ -83,6 +85,11 @@ func (s *Server) RegisterNode(ctx context.Context, req *coordinatorv1.RegisterNo
 	}
 	if req.PublicKey == "" || req.LnNodeUri == "" || req.Capabilities == nil {
 		return nil, status.Error(codes.InvalidArgument, "public_key, ln_node_uri, and capabilities are required")
+	}
+
+	// Rate-limit new registrations per source IP (SRS-SEC-04: max 10 per hour).
+	if err := s.checkRegistrationRateLimit(ctx); err != nil {
+		return nil, err
 	}
 
 	caps := registry.NodeCapabilities{
@@ -499,6 +506,48 @@ func verifyTaskResultSig(pubKeyHex, taskID string, outputHash, sig []byte) error
 		return fmt.Errorf("signature mismatch")
 	}
 	return nil
+}
+
+// checkRegistrationRateLimit enforces SRS-SEC-04: max 10 new node registrations
+// per source IP per hour. Uses Redis when available; skips silently if Redis is nil.
+func (s *Server) checkRegistrationRateLimit(ctx context.Context) error {
+	if s.rdb == nil {
+		return nil
+	}
+	clientIP := extractClientIP(ctx)
+	if clientIP == "" {
+		return nil
+	}
+	key := "owm:reg-rate:" + clientIP
+	count, err := s.rdb.Incr(ctx, key).Result()
+	if err != nil {
+		s.log.Warn("rate-limit redis error (allowing)", zap.String("ip", clientIP), zap.Error(err))
+		return nil
+	}
+	if count == 1 {
+		// First increment: set the 1-hour sliding window TTL.
+		_ = s.rdb.Expire(ctx, key, time.Hour).Err()
+	}
+	const maxPerHour = 10
+	if count > maxPerHour {
+		metrics.OwmRegistrationRateLimitedTotal.WithLabelValues(clientIP).Inc()
+		return status.Errorf(codes.ResourceExhausted,
+			"registration rate limit exceeded: max %d new nodes per IP per hour", maxPerHour)
+	}
+	return nil
+}
+
+// extractClientIP returns the source IP from the gRPC peer context, or "".
+func extractClientIP(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		return p.Addr.String() // fallback: use raw addr
+	}
+	return host
 }
 
 // canonicalTaskResultMessage constructs the deterministic byte string that a node

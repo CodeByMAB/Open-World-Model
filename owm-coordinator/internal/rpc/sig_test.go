@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -155,5 +156,55 @@ func TestVerifyTaskResultSig_WrongPubKeyLength(t *testing.T) {
 	err := verifyTaskResultSig(shortKey, "task", make([]byte, 32), make([]byte, 64))
 	if err == nil {
 		t.Fatal("expected error for public key with wrong length")
+	}
+}
+
+// ─── canonicalDeregisterMessage ──────────────────────────────────────────────
+
+func TestCanonicalDeregisterMessage_Format(t *testing.T) {
+	nodeID := "550e8400-e29b-41d4-a716-446655440000"
+	reason := "shutdown"
+	ts := int64(1700000000)
+	got := string(canonicalDeregisterMessage(nodeID, reason, ts))
+	want := "owm-deregister|550e8400-e29b-41d4-a716-446655440000|shutdown|1700000000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalDeregisterMessage_NodeIDDistinct(t *testing.T) {
+	a := string(canonicalDeregisterMessage("node-1", "reason", 100))
+	b := string(canonicalDeregisterMessage("node-2", "reason", 100))
+	if a == b {
+		t.Error("different node IDs must produce different messages")
+	}
+}
+
+func TestCanonicalDeregisterMessage_TimestampDistinct(t *testing.T) {
+	a := string(canonicalDeregisterMessage("node-1", "reason", 100))
+	b := string(canonicalDeregisterMessage("node-1", "reason", 101))
+	if a == b {
+		t.Error("different timestamps must produce different messages")
+	}
+}
+
+// ─── extractClientIP ─────────────────────────────────────────────────────────
+
+func TestExtractClientIP_NoContext(t *testing.T) {
+	ctx := context.Background()
+	ip := extractClientIP(ctx)
+	if ip != "" {
+		t.Errorf("expected empty IP from bare context, got %q", ip)
+	}
+}
+
+// ─── checkRegistrationRateLimit ──────────────────────────────────────────────
+
+func TestCheckRegistrationRateLimit_NilRedis(t *testing.T) {
+	// When rdb is nil, rate limiting is disabled; must return nil (no error).
+	s := &Server{rdb: nil}
+	err := s.checkRegistrationRateLimit(context.Background())
+	if err != nil {
+		t.Errorf("expected nil with no Redis, got %v", err)
 	}
 }
