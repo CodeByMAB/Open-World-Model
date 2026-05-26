@@ -341,6 +341,13 @@ func run() error {
 		}
 	})
 
+	go runTicker(bgCtx, log, "degraded-grace-enforce", time.Hour, func(ctx context.Context) {
+		gracePeriod := time.Duration(cfg.Stake.DegradedGracePeriodHours) * time.Hour
+		if err := verif.EnforceDegradedGrace(ctx, gracePeriod); err != nil {
+			log.Error("degraded grace period enforcement", zap.Error(err))
+		}
+	})
+
 	go runTicker(bgCtx, log, "fl-expire-rounds", 5*time.Minute, func(ctx context.Context) {
 		n, err := flOrch.CloseExpired(ctx)
 		if err != nil {

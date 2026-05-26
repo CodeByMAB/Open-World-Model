@@ -262,9 +262,9 @@ func (v *Verifier) Slash(ctx context.Context, nodeID uuid.UUID, tier, reason, ev
 		return fmt.Errorf("persisting slash event: %w", err)
 	}
 
-	// Suspend node and mark stake force-closed.
+	// Suspend node and zero reliability atomically (SRS-SEC-11).
 	if _, err := v.db.Exec(ctx,
-		`UPDATE nodes SET status = 'suspended' WHERE node_id = $1`, nodeID,
+		`UPDATE nodes SET status = 'suspended', reliability = 0 WHERE node_id = $1`, nodeID,
 	); err != nil {
 		return err
 	}
@@ -306,6 +306,49 @@ func (v *Verifier) markDegraded(ctx context.Context, nodeID uuid.UUID) error {
 		nodeID,
 	)
 	return err
+}
+
+// EnforceDegradedGrace suspends any node that has remained in degraded status for
+// longer than gracePeriod without restoring its stake (SRS-STAKE-03: 24h grace).
+func (v *Verifier) EnforceDegradedGrace(ctx context.Context, gracePeriod time.Duration) error {
+	cutoff := time.Now().UTC().Add(-gracePeriod)
+	rows, err := v.db.Query(ctx,
+		`SELECT n.node_id, n.tier
+		 FROM nodes n
+		 JOIN node_stakes ns ON ns.node_id = n.node_id
+		 WHERE n.status = 'degraded'
+		   AND ns.degraded_since IS NOT NULL
+		   AND ns.degraded_since < $1`,
+		cutoff,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			nodeID uuid.UUID
+			tier   string
+		)
+		if err := rows.Scan(&nodeID, &tier); err != nil {
+			v.log.Error("scanning expired-degraded node", zap.Error(err))
+			continue
+		}
+		if _, err := v.db.Exec(ctx,
+			`UPDATE nodes SET status = 'suspended' WHERE node_id = $1 AND status = 'degraded'`,
+			nodeID,
+		); err != nil {
+			v.log.Error("suspending expired-degraded node",
+				zap.String("node_id", nodeID.String()), zap.Error(err))
+			continue
+		}
+		metrics.OwmNodesTotal.WithLabelValues(tier, "degraded").Dec()
+		metrics.OwmNodesTotal.WithLabelValues(tier, "suspended").Inc()
+		v.log.Warn("node suspended: stake grace period expired",
+			zap.String("node_id", nodeID.String()), zap.String("tier", tier))
+	}
+	return rows.Err()
 }
 
 // computeBonus implements the stake bonus formula from SRS-4.4.2:
