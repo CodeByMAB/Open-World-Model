@@ -18,6 +18,11 @@ type dbQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// rowsQuerier is the interface for handlers that need to iterate over multiple rows.
+type rowsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 type nodeStatusRow struct {
 	NodeID string
 	Tier   string
