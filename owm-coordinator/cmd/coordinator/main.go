@@ -285,6 +285,8 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("GET /internal/pool/nodes/{pubkey}/status", poolhttp.HandleGetNodeStatus(db, log))
+	mux.HandleFunc("GET /v1/network/slashing-log", poolhttp.HandleGetSlashingLog(db, log))
+	mux.HandleFunc("GET /v1/payments/history", poolhttp.HandleGetPaymentsHistory(db, log))
 	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
