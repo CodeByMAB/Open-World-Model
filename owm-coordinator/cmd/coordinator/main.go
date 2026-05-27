@@ -102,7 +102,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	defer m.Close()
+	defer func() { _, _ = m.Close() }()
 	migrateErr := m.Up()
 	if migrateErr != nil && migrateErr != migrate.ErrNoChange {
 		return fmt.Errorf("migrate up: %w", migrateErr)

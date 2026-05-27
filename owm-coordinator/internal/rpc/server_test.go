@@ -125,7 +125,7 @@ func TestGRPCServer_RejectsClientWithoutCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grpc.Dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

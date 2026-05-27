@@ -51,7 +51,7 @@ func MustDB(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("testutil.MustDB: migrate.New: %v", err)
 	}
-	defer m.Close()
+	defer func() { _, _ = m.Close() }()
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		t.Fatalf("testutil.MustDB: migrate.Up: %v", err)
 	}

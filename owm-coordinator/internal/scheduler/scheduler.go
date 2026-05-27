@@ -237,7 +237,7 @@ func (s *Scheduler) computeReward(ctx context.Context, node *registry.Node, task
 	weight := taskWeights[taskType]
 
 	// Fetch stake bonus from DB.
-	var bonusMult float64 = 1.0
+	bonusMult := 1.0
 	_ = s.db.QueryRow(ctx,
 		`SELECT bonus_multiplier FROM node_stakes WHERE node_id = $1`, node.NodeID,
 	).Scan(&bonusMult)

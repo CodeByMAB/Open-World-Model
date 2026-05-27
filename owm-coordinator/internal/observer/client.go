@@ -93,7 +93,7 @@ func (c *Client) Submit(ctx context.Context, r Receipt) (receiptID string, err e
 	if err != nil {
 		return "", fmt.Errorf("observer: POST receipts: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		c.log.Warn("observer submission failed",

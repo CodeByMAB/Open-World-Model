@@ -234,7 +234,7 @@ func (s *Server) StreamTasks(req *coordinatorv1.HeartbeatRequest, stream coordin
 	}
 
 	sub := s.rdb.Subscribe(stream.Context(), "owm:tasks:"+nodeID)
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	ch := sub.Channel()
 	for {
