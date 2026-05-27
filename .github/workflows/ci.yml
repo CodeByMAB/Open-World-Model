@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: ["main", "dev", "work", "staging"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "dev"]
 
 jobs:
   # ── owm-coordinator ──────────────────────────────────────────────────────────
@@ -121,6 +121,36 @@ jobs:
           kubectl kustomize k8s/overlays/prod >/tmp/prod.yaml
           kubectl kustomize k8s/overlays/prod-mtls >/tmp/prod-mtls.yaml
           test -s /tmp/dev.yaml && test -s /tmp/prod.yaml && test -s /tmp/prod-mtls.yaml
+
+  # ── CVE / dependency scanning (SRS-SEC-10) ───────────────────────────────────
+  security:
+    name: security scan
+    runs-on: ubuntu-latest
+    needs: coordinator
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: owm-coordinator/go.sum
+
+      - name: govulncheck (Go vulnerability database)
+        working-directory: owm-coordinator
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: owm-coordinator
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
 
   # ── Docker build check ───────────────────────────────────────────────────────
   docker:

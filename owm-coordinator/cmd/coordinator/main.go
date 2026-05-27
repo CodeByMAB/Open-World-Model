@@ -286,6 +286,12 @@ func run() error {
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("GET /internal/pool/nodes/{pubkey}/status", poolhttp.HandleGetNodeStatus(db, log))
 	mux.HandleFunc("GET /v1/network/slashing-log", poolhttp.HandleGetSlashingLog(db, log))
+	mux.HandleFunc("GET /v1/network/stats", poolhttp.HandleGetNetworkStats(db, log))
+	mux.HandleFunc("GET /v1/network/nodes", poolhttp.HandleGetNetworkNodes(db, log))
+	mux.HandleFunc("GET /v1/stake/requirements", poolhttp.HandleGetStakeRequirements(log))
+	mux.HandleFunc("GET /v1/stake/nodes/{node_id}", poolhttp.HandleGetStakeNode(db, log))
+	mux.HandleFunc("GET /v1/nodes/{node_id}/status", poolhttp.HandleGetNodeStatusV1(db, log))
+	mux.HandleFunc("GET /v1/nodes/{node_id}/earnings", poolhttp.HandleGetNodeEarnings(db, log))
 	mux.HandleFunc("GET /v1/payments/history", poolhttp.HandleGetPaymentsHistory(db, log))
 	mux.HandleFunc("POST /v1/admin/slash-ack", poolhttp.HandleMaintainerSlashAck(verif, log))
 	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}
