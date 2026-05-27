@@ -178,10 +178,10 @@ func TestDispatchPendingIntegration(t *testing.T) {
 		return id
 	}
 
-	dataIngestID := insertPending("data_ingest")
+	embedDataID := insertPending("embed_data")
 	inferenceID := insertPending("inference")
 	flRoundID := insertPending("fl_round")
-	_ = dataIngestID
+	_ = embedDataID
 	_ = inferenceID
 
 	sched := scheduler.New(pool, reg, nil, testutil.Logger())

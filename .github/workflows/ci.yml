@@ -66,7 +66,7 @@ jobs:
         run: go build ./cmd/coordinator
 
       - name: Run unit tests
-        run: go test -v -count=1 -race ./...
+        run: go test -v -count=1 -race -p 1 ./...
         env:
           OWM_TEST_DSN: postgres://owm:owm@localhost:5432/owm_test
 
