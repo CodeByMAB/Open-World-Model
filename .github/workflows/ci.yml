@@ -31,10 +31,10 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.24"
           cache-dependency-path: owm-coordinator/go.sum
@@ -79,10 +79,10 @@ jobs:
         working-directory: owm-coordinator
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.24"
           cache-dependency-path: owm-coordinator/go.sum
@@ -102,7 +102,7 @@ jobs:
             proto/coordinator/v1/coordinator.proto
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
           version: latest
           working-directory: owm-coordinator
@@ -113,7 +113,7 @@ jobs:
     name: kustomize build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build overlays
         run: |
@@ -129,10 +129,10 @@ jobs:
     needs: coordinator
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v5.5.0
         with:
           go-version: "1.24"
           cache-dependency-path: owm-coordinator/go.sum
@@ -159,13 +159,13 @@ jobs:
     needs: coordinator
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3.11.1
 
       - name: Build coordinator image (no push)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: owm-coordinator
           push: false

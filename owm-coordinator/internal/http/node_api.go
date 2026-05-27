@@ -158,11 +158,11 @@ func HandleGetNodeEarnings(db *pgxpool.Pool, log *zap.Logger) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(earningsResponse{
+		json.NewEncoder(w).Encode(earningsResponse{ //nolint:errcheck
 			NodeID:          nodeIDStr,
 			TotalSatsEarned: totalSats,
 			Tasks:           tasks,
 			Total:           totalTasks,
-		}) //nolint:errcheck
+		})
 	}
 }
